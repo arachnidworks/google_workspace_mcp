@@ -1,0 +1,104 @@
+name: AW Sync Upstream (tested)
+
+# Weekly: pull taylorwilsdon/google_workspace_mcp into this fork's main,
+# run the same CI as upstream (ruff + pytest), and only push if green.
+# Deploy to Cloud Run stays a human-gated step — this job just keeps the
+# fork current and opens an issue when a new tested version is ready.
+
+on:
+  schedule:
+    - cron: "0 13 * * 1" # Mondays 13:00 UTC (~9am ET)
+  workflow_dispatch: {} # allow manual runs
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: aw-sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/taylorwilsdon/google_workspace_mcp.git
+          git fetch upstream main
+
+      - name: Check how far behind upstream
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "main is $BEHIND commit(s) behind upstream/main"
+
+      - name: Merge upstream onto main
+        if: steps.check.outputs.behind != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Our only local change is this workflow file, which upstream never
+          # touches, so this merge is clean. If it ever conflicts, the job
+          # fails loudly (someone committed real changes to the fork).
+          git merge --no-edit upstream/main
+
+      - name: Install uv
+        if: steps.check.outputs.behind != '0'
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Python
+        if: steps.check.outputs.behind != '0'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        if: steps.check.outputs.behind != '0'
+        run: uv sync --extra test --frozen
+
+      - name: Ruff
+        if: steps.check.outputs.behind != '0'
+        run: uvx ruff check
+
+      - name: Pytest
+        if: steps.check.outputs.behind != '0'
+        run: uv run pytest
+
+      - name: Push updated main (tests passed)
+        if: steps.check.outputs.behind != '0'
+        run: git push origin main
+
+      - name: Open "ready to deploy" issue
+        if: steps.check.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # NOTE: this repo is public — keep deploy specifics (project id,
+          # service name, gcloud commands) out of issue bodies. Point to the
+          # private runbook instead.
+          VER=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          BODY=$(cat <<EOF
+          Fork \`main\` was synced to upstream **v${VER}** and passed ruff + pytest.
+
+          Deploy to Cloud Run is gated and manual — follow the internal deploy
+          runbook, then bump the \`google_workspace_mcp\` submodule pointer in
+          aw-claude-mcps.
+          EOF
+          )
+          gh issue create --title "Upstream synced to v${VER} — tested, ready to deploy" --body "$BODY" || true
+
+      - name: Open failure issue
+        if: failure() && steps.check.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Upstream sync FAILED (fork not updated)" \
+            --body "The weekly upstream sync hit a merge conflict or red tests. Fork \`main\` was NOT changed. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" || true
