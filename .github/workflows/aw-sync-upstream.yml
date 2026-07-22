@@ -12,7 +12,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
 
 concurrency:
   group: aw-sync-upstream
@@ -75,30 +74,25 @@ jobs:
         if: steps.check.outputs.behind != '0'
         run: git push origin main
 
-      - name: Open "ready to deploy" issue
+      # Issues are disabled on this fork, so notify via the run summary.
+      # GitHub also emails the workflow owner automatically on failure.
+      - name: Report — ready to deploy
         if: steps.check.outputs.behind != '0'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # NOTE: this repo is public — keep deploy specifics (project id,
-          # service name, gcloud commands) out of issue bodies. Point to the
-          # private runbook instead.
           VER=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
-          BODY=$(cat <<EOF
-          Fork \`main\` was synced to upstream **v${VER}** and passed ruff + pytest.
+          {
+            echo "## ✅ Upstream synced to v${VER} — tested, ready to deploy"
+            echo ""
+            echo "Fork \`main\` was synced to upstream and passed ruff + pytest, then pushed."
+            echo "Deploy to Cloud Run is **gated and manual** — follow the internal deploy runbook,"
+            echo "then bump the \`google_workspace_mcp\` submodule pointer in aw-claude-mcps."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          Deploy to Cloud Run is gated and manual — follow the internal deploy
-          runbook, then bump the \`google_workspace_mcp\` submodule pointer in
-          aw-claude-mcps.
-          EOF
-          )
-          gh issue create --title "Upstream synced to v${VER} — tested, ready to deploy" --body "$BODY" || true
-
-      - name: Open failure issue
+      - name: Report — sync failed
         if: failure() && steps.check.outputs.behind != '0'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh issue create \
-            --title "Upstream sync FAILED (fork not updated)" \
-            --body "The weekly upstream sync hit a merge conflict or red tests. Fork \`main\` was NOT changed. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" || true
+          {
+            echo "## ❌ Upstream sync FAILED — fork NOT updated"
+            echo ""
+            echo "Merge conflict or red tests. \`main\` was left unchanged; investigate before deploying."
+          } >> "$GITHUB_STEP_SUMMARY"
