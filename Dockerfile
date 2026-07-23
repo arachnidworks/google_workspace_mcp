@@ -15,6 +15,12 @@ COPY . .
 # Install Python dependencies using uv sync
 RUN uv sync --frozen --no-dev --extra disk
 
+# AW native parity: add the Firestore key-value backend so OAuth proxy sessions
+# and the re-auth policy can persist across Cloud Run cold starts. Installed
+# on top of the frozen sync (like the upstream Valkey extra, which is also not
+# in the default image) so the base lock file is untouched.
+RUN uv pip install "py-key-value-aio[firestore]"
+
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash app \
     && chown -R app:app /app
