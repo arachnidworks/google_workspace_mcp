@@ -1,11 +1,13 @@
 """
 Re-auth policy tests (clock-injected, no real waiting).
 
-Proves the three fleet rules on ReauthPolicyStore:
-  * a fresh session is accepted and recorded,
+Proves the policy state machine on ReauthPolicyStore:
+  * start() opens a fresh window,
   * an actively-used session keeps sliding past the 5-day window,
-  * inactivity beyond the window forces re-auth,
-  * the 30-day absolute cap forces re-auth even for a continuously active user.
+  * inactivity beyond the window reports re-auth WITHOUT mutating the record
+    (so the decision is sticky, not self-resetting),
+  * the 30-day absolute cap reports re-auth even for a continuously active user,
+  * slide() records activity but never creates a record or resets the cap.
 """
 
 import asyncio
@@ -14,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from key_value.aio.stores.memory import MemoryStore
 
 from auth.aw_reauth import ReauthPolicyStore
+
+KEY = "upstream-token-abc"
 
 
 class FakeClock:
@@ -27,27 +31,29 @@ class FakeClock:
         self.now = self.now + timedelta(**kwargs)
 
 
-def _store(clock, **kwargs):
-    return ReauthPolicyStore(
-        MemoryStore(),
-        inactivity_days=5,
-        max_days=30,
-        clock=clock,
-        **kwargs,
-    )
+def _store(clock):
+    return ReauthPolicyStore(MemoryStore(), inactivity_days=5, max_days=30, clock=clock)
 
 
-def test_new_session_is_accepted_and_recorded():
+def test_start_then_active_session():
     clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
     store = _store(clock)
 
     async def go():
-        status, reason = await store.touch("user@aw.com")
-        assert (status, reason) == ("ok", "new_session")
-        # A subsequent immediate call is an active session, not a new one.
-        status2, reason2 = await store.touch("user@aw.com")
-        assert status2 == "ok"
-        assert reason2 == "active"
+        await store.start(KEY)
+        status, reason = await store.check_and_slide(KEY)
+        assert (status, reason) == ("ok", "active")
+
+    asyncio.run(go())
+
+
+def test_check_without_start_fails_closed():
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+    store = _store(clock)
+
+    async def go():
+        # No start(): a refresh with no policy record must force re-auth.
+        assert (await store.check_and_slide(KEY)) == ("reauth_required", "no_session")
 
     asyncio.run(go())
 
@@ -57,31 +63,25 @@ def test_active_session_slides_past_five_days():
     store = _store(clock)
 
     async def go():
-        assert (await store.touch("u@aw.com"))[0] == "ok"
-        # Use it every 4 days for 20 days: each use is within the 5-day window
-        # of the previous use, so it must stay valid the whole time.
+        await store.start(KEY)
+        # Refresh every 4 days for 20 days: each within the 5-day window.
         for _ in range(5):
             clock.advance(days=4)
-            status, reason = await store.touch("u@aw.com")
-            assert status == "ok", reason
-            assert reason == "active"
+            assert (await store.check_and_slide(KEY)) == ("ok", "active")
 
     asyncio.run(go())
 
 
-def test_inactivity_beyond_window_forces_reauth():
+def test_inactivity_forces_reauth_and_does_not_self_reset():
     clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
     store = _store(clock)
 
     async def go():
-        await store.touch("idle@aw.com")
-        clock.advance(days=5, hours=1)  # just over 5 days, no activity between
-        status, reason = await store.touch("idle@aw.com")
-        assert (status, reason) == ("reauth_required", "inactivity")
-        # After re-auth-required the record is cleared, so the next touch is a
-        # brand new session.
-        status2, reason2 = await store.touch("idle@aw.com")
-        assert (status2, reason2) == ("ok", "new_session")
+        await store.start(KEY)
+        clock.advance(days=5, hours=1)  # just over the inactivity window
+        assert (await store.check_and_slide(KEY)) == ("reauth_required", "inactivity")
+        # Sticky: a retry does NOT silently succeed (no self-reset to new_session).
+        assert (await store.check_and_slide(KEY)) == ("reauth_required", "inactivity")
 
     asyncio.run(go())
 
@@ -91,27 +91,51 @@ def test_thirty_day_cap_forces_reauth_even_when_active():
     store = _store(clock)
 
     async def go():
-        await store.touch("busy@aw.com")
-        # Stay active (every 4 days) well past 30 days.
+        await store.start(KEY)
         hit_cap = False
-        for _ in range(10):
+        for _ in range(10):  # stay active every 4 days, well past 30
             clock.advance(days=4)
-            status, reason = await store.touch("busy@aw.com")
+            status, reason = await store.check_and_slide(KEY)
             if status == "reauth_required":
                 assert reason == "max_age"
                 hit_cap = True
                 break
-        assert hit_cap, "30-day absolute cap should have fired for an active user"
+        assert hit_cap, "30-day cap should fire even for a continuously active user"
+        # Sticky after the cap trips.
+        assert (await store.check_and_slide(KEY))[0] == "reauth_required"
 
     asyncio.run(go())
 
 
-def test_missing_identity_fails_closed():
+def test_reauth_then_fresh_start_resets_window():
     clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
     store = _store(clock)
 
     async def go():
-        assert (await store.touch(""))[0] == "reauth_required"
-        assert (await store.touch(None))[0] == "reauth_required"
+        await store.start(KEY)
+        clock.advance(days=40)
+        # Idle for 40 days: re-auth required (inactivity trips first).
+        assert (await store.check_and_slide(KEY))[0] == "reauth_required"
+        # A completed re-authorization starts a brand new window.
+        await store.start(KEY)
+        assert (await store.check_and_slide(KEY)) == ("ok", "active")
+
+    asyncio.run(go())
+
+
+def test_slide_never_creates_record_or_resets_cap():
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+    store = _store(clock)
+
+    async def go():
+        # slide() on an unknown session is a no-op (does not create a record).
+        await store.slide(KEY)
+        assert (await store.check_and_slide(KEY)) == ("reauth_required", "no_session")
+
+        # After start, slide advances last_used but preserves session_start.
+        await store.start(KEY)
+        clock.advance(days=40)  # past the 30-day cap
+        await store.slide(KEY)  # activity, but must NOT reset session_start
+        assert (await store.check_and_slide(KEY)) == ("reauth_required", "max_age")
 
     asyncio.run(go())

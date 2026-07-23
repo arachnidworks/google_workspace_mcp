@@ -85,30 +85,42 @@ def build_encrypted_store(
 ):
     """Build a Fernet-encrypted, hash-keyed persistent store.
 
-    Backend selection (env ``backend_env``, default "firestore"):
-      * firestore -> FirestoreStore (survives Cloud Run cold starts)
-      * memory    -> in-memory (dev / fallback only)
+    Backend selection (env ``backend_env``):
+      * "firestore" (EXPLICIT) -> FirestoreStore; if it cannot be constructed,
+        raise RuntimeError. Fail closed: silently dropping to memory would
+        reintroduce cold-start session loss, so an explicit request that cannot
+        be honoured is a hard startup error, not a warning.
+      * "memory"               -> in-memory.
+      * unset / anything else (AUTO) -> Firestore if available, else in-memory
+        with a warning. Silent fallback is acceptable only when no explicit
+        backend was requested (local / stdio / dev).
     An explicit ``backend`` object overrides env selection (used by tests to
-    inject a DiskStore for a real process-restart round-trip).
-
-    Returns an object with the py-key-value-aio async interface. Fails soft to
-    in-memory storage if the requested backend cannot be created, matching the
-    fork's existing "log a warning, keep serving" behaviour.
+    inject a FileTreeStore for a real process-restart round-trip).
     """
     from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
     from cryptography.fernet import Fernet
 
     raw = backend
     if raw is None:
-        choice = os.getenv(backend_env, "firestore").strip().lower()
+        choice = os.getenv(backend_env, "").strip().lower()
         if choice == "memory":
             raw = _build_memory_backend()
+        elif choice == "firestore":
+            raw = _build_firestore_backend(collection)
+            if raw is None:
+                raise RuntimeError(
+                    f"{backend_env}=firestore was explicitly requested but the Firestore "
+                    f"store for collection '{collection}' could not be created. Install "
+                    "'py-key-value-aio[firestore]' and ensure GCP Firestore access. "
+                    "Refusing to start with a silent in-memory fallback."
+                )
         else:
             raw = _build_firestore_backend(collection)
             if raw is None:
                 logger.warning(
-                    "Falling back to in-memory AW store for collection '%s'; "
-                    "data will NOT survive a restart.",
+                    "No persistent backend requested (%s unset); using in-memory AW store "
+                    "for collection '%s'. Data will NOT survive a restart.",
+                    backend_env,
                     collection,
                 )
                 raw = _build_memory_backend()

@@ -636,13 +636,17 @@ def configure_server_for_http():
                         "OAuth 2.1: Using FirestoreStore for FastMCP OAuth proxy client_storage (collection=%s)",
                         firestore_collection,
                     )
-                except ImportError as exc:
-                    logger.warning(
-                        "OAuth 2.1: Firestore client_storage requested but Firestore dependencies "
-                        "are not installed (%s). Install 'py-key-value-aio[firestore]' or unset "
-                        "WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND. Falling back to default storage.",
-                        exc,
-                    )
+                except Exception as exc:
+                    # Fail closed: Firestore was EXPLICITLY selected, so silently
+                    # dropping to in-memory would reintroduce the exact cold-start
+                    # session loss this workstream exists to fix. Refuse to start.
+                    raise RuntimeError(
+                        "OAuth 2.1: Firestore client_storage was explicitly requested "
+                        "(WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND=firestore) but could not "
+                        f"be initialized: {exc}. Install 'py-key-value-aio[firestore]' and "
+                        "ensure GCP Firestore access, or choose another backend. Refusing to "
+                        "start with a silent in-memory fallback."
+                    ) from exc
             elif storage_backend == "memory":
                 from key_value.aio.stores.memory import MemoryStore
 
@@ -682,7 +686,12 @@ def configure_server_for_http():
                     "Protected resource metadata points to Google's authorization server"
                 )
             else:
-                # Standard OAuth 2.1 mode: use FastMCP's GoogleProvider
+                # Standard OAuth 2.1 mode: AwGoogleProvider is FastMCP's
+                # GoogleProvider plus the AW 5-day/30-day re-auth policy enforced
+                # on the refresh path. Drop-in; per-user credential behaviour is
+                # unchanged.
+                from auth.aw_reauth_provider import AwGoogleProvider
+
                 allowed_client_redirect_uris = _parse_allowed_redirect_uris(
                     os.getenv("WORKSPACE_MCP_ALLOWED_CLIENT_REDIRECT_URIS")
                 )
@@ -691,7 +700,7 @@ def configure_server_for_http():
                         "OAuth 2.1: restricting DCR client redirect URIs to allowlist: %s",
                         allowed_client_redirect_uris,
                     )
-                provider = GoogleProvider(
+                provider = AwGoogleProvider(
                     client_id=config.client_id,
                     client_secret=config.client_secret,
                     base_url=config.get_oauth_base_url(),

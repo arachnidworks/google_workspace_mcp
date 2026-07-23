@@ -1,20 +1,21 @@
 """
 ArachnidWorks policy middleware for google_workspace_mcp.
 
-One choke point on the tool-call hook (FastMCP ``on_call_tool``) that provides
-the three fleet-wide guarantees the fork lacked, using the fork's own identity
-source (the validated access token / auth context):
+One choke point on the tool-call hook (FastMCP ``on_call_tool``), using the
+fork's own identity source (the validated access token / auth context):
 
   1. Audit trail   - one structured JSON line to stderr per tool call, with the
                      same schema as the rest of the AW fleet.
   2. Email allowlist gate (ALLOWED_EMAILS) - fail-closed: unset/empty list, or
                      an identity we cannot verify, denies the call.
-  3. Re-auth policy - 5-day sliding inactivity + 30-day absolute cap, enforced
-                     against the persistent ReauthPolicyStore.
+  3. Re-auth activity sliding - records tool-call activity so the 5-day
+                     inactivity window slides at tool-call granularity. The
+                     re-auth policy is ENFORCED on the OAuth refresh path
+                     (AwGoogleProvider), not here.
 
-Allowlist + re-auth are enforced in HTTP transport only (stdio is single-user
-and unauthenticated by design, matching the rest of the fork). The audit line
-is emitted for every tool call regardless of transport.
+The allowlist is enforced in HTTP transport only (stdio is single-user and
+unauthenticated by design, matching the rest of the fork). The audit line is
+emitted for every tool call regardless of transport.
 """
 
 import json
@@ -27,8 +28,6 @@ from typing import List, Optional
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_access_token
-
-from auth.aw_reauth import get_reauth_store
 
 logger = logging.getLogger(__name__)
 
@@ -90,18 +89,37 @@ def _check_allowlist(email: Optional[str]) -> Optional[str]:
     return None
 
 
-def _evict_session(email: str) -> None:
-    """Drop the cached Google session so a re-auth is actually required."""
-    try:
-        from auth.oauth21_session_store import get_oauth21_session_store
+async def _slide_activity() -> None:
+    """Record tool-call activity against the re-auth policy (best-effort).
 
-        get_oauth21_session_store().remove_session(email)
+    Delegates to AwGoogleProvider, which resolves the stable upstream_token_id
+    from the current access token and slides last_used. Never enforces, never
+    raises into the call path.
+    """
+    try:
+        from core.server import get_auth_provider
+        from auth.aw_reauth_provider import AwGoogleProvider
+
+        provider = get_auth_provider()
+        if not isinstance(provider, AwGoogleProvider):
+            return
+        token = get_access_token()
+        token_str = getattr(token, "token", None) if token else None
+        if token_str:
+            await provider.slide_activity(token_str)
     except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("Failed to evict session for %s: %s", email, exc)
+        logger.debug("Activity slide skipped: %s", exc)
 
 
 class AwPolicyMiddleware(Middleware):
-    """Audit + allowlist + re-auth enforcement on every tool call."""
+    """Audit + email allowlist on every tool call, plus re-auth activity sliding.
+
+    Re-auth is ENFORCED on the OAuth refresh path (see AwGoogleProvider), not
+    here: denying a single tool call does not force re-authentication (the client
+    retries and the still-valid provider token rebuilds credentials). This
+    middleware only records activity so the 5-day inactivity window slides at
+    tool-call granularity.
+    """
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         message = getattr(context, "message", None)
@@ -120,16 +138,9 @@ class AwPolicyMiddleware(Middleware):
                 if allow_error:
                     raise PermissionError(allow_error)
 
-                store = get_reauth_store()
-                if store is not None:
-                    status, reason = await store.touch(email)
-                    if status == "reauth_required":
-                        if email:
-                            _evict_session(email)
-                        raise PermissionError(
-                            "Error: Your session has expired under the re-auth policy "
-                            f"({reason}). Please reconnect the MCP integration to continue."
-                        )
+                # Record activity for the sliding inactivity window (best-effort;
+                # never enforces or fails the call).
+                await _slide_activity()
 
             return await call_next(context)
         except Exception:

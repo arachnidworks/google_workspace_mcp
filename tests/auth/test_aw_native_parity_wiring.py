@@ -28,6 +28,17 @@ def test_fastmcp_consent_swap_target_still_exists():
     assert hasattr(consent, "create_consent_html")
 
 
+def test_branded_consent_signature_matches_stock():
+    # Signature parity: our drop-in must accept exactly the params FastMCP's
+    # generator does, so a signature change (not just a rename) fails here.
+    import inspect
+
+    ui = importlib.import_module("fastmcp.server.auth.oauth_proxy.ui")
+    stock = inspect.signature(ui.create_consent_html)
+    ours = inspect.signature(aw_consent.aw_create_consent_html)
+    assert list(ours.parameters) == list(stock.parameters)
+
+
 def test_install_branded_consent_swaps_symbol(monkeypatch):
     monkeypatch.setenv("WORKSPACE_MCP_BRAND", "on")
     consent = importlib.import_module("fastmcp.server.auth.oauth_proxy.consent")

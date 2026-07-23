@@ -46,6 +46,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 ENV TOOL_TIER=""
 ENV TOOLS=""
 
-# Use entrypoint for the base command and CMD for args
+# Use entrypoint for the base command and CMD for args.
+# --no-sync: run against the already-built environment WITHOUT re-syncing, so the
+# supplemental Firestore extra installed above (not in the frozen lock) is not
+# stripped at container start. Without this, `uv run` re-syncs to the exact lock
+# and Firestore silently disappears, reintroducing cold-start session loss.
 ENTRYPOINT ["/bin/sh", "-c"]
-CMD ["uv run main.py --transport streamable-http ${TOOL_TIER:+--tool-tier \"$TOOL_TIER\"} ${TOOLS:+--tools $TOOLS}"]
+CMD ["uv run --no-sync main.py --transport streamable-http ${TOOL_TIER:+--tool-tier \"$TOOL_TIER\"} ${TOOLS:+--tools $TOOLS}"]

@@ -1,18 +1,21 @@
 """
-Policy middleware tests: email allowlist (fail-closed), audit emission, and
-re-auth enforcement at the tool-call hook.
+Policy middleware tests: email allowlist (fail-closed) and audit emission.
+
+Re-auth is enforced on the OAuth refresh path (see test_aw_reauth_provider.py),
+NOT in this middleware. Here we only confirm the middleware gates on the
+allowlist and always emits a well-formed audit line, and that stdio mode does
+not enforce.
 """
 
 import asyncio
 import json
 import types
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 import pytest
-from key_value.aio.stores.memory import MemoryStore
 
 from auth import aw_policy_middleware as pm
-from auth.aw_reauth import ReauthPolicyStore, set_reauth_store
+from auth.aw_reauth import set_reauth_store
 
 
 def _ctx(tool="do_thing", args=None):
@@ -113,30 +116,27 @@ def test_middleware_denies_unlisted_user_and_audits_error(monkeypatch, capsys):
     assert entry["arg_keys"] == ["a", "b"]  # names only, never values
 
 
-def test_middleware_forces_reauth_when_policy_expired(monkeypatch):
+def test_middleware_does_not_enforce_reauth_only_slides(monkeypatch, capsys):
+    # Even with no auth provider set (so activity sliding is a no-op), an
+    # allowlisted call must succeed: the middleware must NOT deny on re-auth.
     monkeypatch.setenv("ALLOWED_EMAILS", "user@aw.com")
     monkeypatch.setattr(pm, "_transport_mode", lambda: "streamable-http")
     monkeypatch.setattr(
         pm, "get_access_token",
         lambda: types.SimpleNamespace(email="user@aw.com", claims={}),
     )
-    monkeypatch.setattr(pm, "_evict_session", lambda e: None)
+    set_reauth_store(None)
+    mw = pm.AwPolicyMiddleware()
+    called = {}
 
-    clock = {"t": datetime(2026, 1, 1, tzinfo=timezone.utc)}
-    store = ReauthPolicyStore(MemoryStore(), inactivity_days=5, max_days=30, clock=lambda: clock["t"])
-    _run(store.touch("user@aw.com"))
-    clock["t"] = clock["t"] + timedelta(days=6)  # exceed inactivity window
-    set_reauth_store(store)
-    try:
-        mw = pm.AwPolicyMiddleware()
+    async def call_next(ctx):
+        called["yes"] = True
+        return "OK"
 
-        async def call_next(ctx):
-            return "R"
-
-        with pytest.raises(PermissionError):
-            _run(mw.on_call_tool(_ctx(), call_next))
-    finally:
-        set_reauth_store(None)
+    result = _run(mw.on_call_tool(_ctx(), call_next))
+    assert result == "OK"
+    assert called.get("yes")
+    assert _last_audit(capsys)["outcome"] == "ok"
 
 
 def test_stdio_mode_skips_enforcement_but_still_audits(monkeypatch, capsys):
