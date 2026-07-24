@@ -19,7 +19,9 @@ from auth.aw_reauth import set_reauth_store
 
 
 def _ctx(tool="do_thing", args=None):
-    message = types.SimpleNamespace(name=tool, arguments=args if args is not None else {"a": 1, "b": 2})
+    message = types.SimpleNamespace(
+        name=tool, arguments=args if args is not None else {"a": 1, "b": 2}
+    )
     return types.SimpleNamespace(message=message, fastmcp_context=None)
 
 
@@ -46,6 +48,7 @@ def _last_audit(capsys):
 
 # ---- allowlist (pure helper) ------------------------------------------------
 
+
 def test_allowlist_fail_closed_when_unset(monkeypatch):
     monkeypatch.delenv("ALLOWED_EMAILS", raising=False)
     assert pm._check_allowlist("x@aw.com") is not None
@@ -61,12 +64,16 @@ def test_allowlist_denies_unknown_and_missing_identity(monkeypatch):
 
 # ---- middleware -------------------------------------------------------------
 
+
 def test_middleware_allows_listed_user_and_audits_ok(monkeypatch, capsys):
     monkeypatch.setenv("ALLOWED_EMAILS", "user@aw.com")
     monkeypatch.setattr(pm, "_transport_mode", lambda: "streamable-http")
     monkeypatch.setattr(
-        pm, "get_access_token",
-        lambda: types.SimpleNamespace(email="user@aw.com", claims={"email": "user@aw.com"}),
+        pm,
+        "get_access_token",
+        lambda: types.SimpleNamespace(
+            email="user@aw.com", claims={"email": "user@aw.com"}
+        ),
     )
     set_reauth_store(None)
     mw = pm.AwPolicyMiddleware()
@@ -95,7 +102,8 @@ def test_middleware_denies_unlisted_user_and_audits_error(monkeypatch, capsys):
     monkeypatch.setenv("ALLOWED_EMAILS", "user@aw.com")
     monkeypatch.setattr(pm, "_transport_mode", lambda: "streamable-http")
     monkeypatch.setattr(
-        pm, "get_access_token",
+        pm,
+        "get_access_token",
         lambda: types.SimpleNamespace(email="intruder@aw.com", claims={}),
     )
     set_reauth_store(None)
@@ -122,7 +130,8 @@ def test_middleware_does_not_enforce_reauth_only_slides(monkeypatch, capsys):
     monkeypatch.setenv("ALLOWED_EMAILS", "user@aw.com")
     monkeypatch.setattr(pm, "_transport_mode", lambda: "streamable-http")
     monkeypatch.setattr(
-        pm, "get_access_token",
+        pm,
+        "get_access_token",
         lambda: types.SimpleNamespace(email="user@aw.com", claims={}),
     )
     set_reauth_store(None)

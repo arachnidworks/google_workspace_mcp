@@ -21,7 +21,12 @@ from a FastMCP token's JTI exactly as the base provider does.
 import logging
 
 from fastmcp.server.auth.providers.google import GoogleProvider
-from mcp.server.auth.provider import AuthorizationCode, OAuthClientInformationFull, RefreshToken, TokenError
+from mcp.server.auth.provider import (
+    AuthorizationCode,
+    OAuthClientInformationFull,
+    RefreshToken,
+    TokenError,
+)
 from mcp.shared.auth import OAuthToken
 
 from auth.aw_reauth import get_reauth_store

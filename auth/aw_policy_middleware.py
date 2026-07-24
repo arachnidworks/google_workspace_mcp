@@ -133,7 +133,9 @@ class AwPolicyMiddleware(Middleware):
         message = getattr(context, "message", None)
         tool_name = getattr(message, "name", None) or "unknown"
         arguments = getattr(message, "arguments", None) or {}
-        arg_keys: List[str] = sorted(arguments.keys()) if isinstance(arguments, dict) else []
+        arg_keys: List[str] = (
+            sorted(arguments.keys()) if isinstance(arguments, dict) else []
+        )
 
         email = _actor_email(context)
         enforce = _transport_mode() == "streamable-http"

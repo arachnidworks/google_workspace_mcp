@@ -60,8 +60,12 @@ def test_branded_form_fields_match_fastmcp_submit_handler():
     # The AW consent form must post the exact fields OAuthProxy._submit_consent
     # reads, or the OAuth flow breaks. This ties the branding to the flow.
     html = aw_consent.aw_create_consent_html(
-        client_id="c", redirect_uri="https://claude.ai/cb", scopes=["openid"],
-        txn_id="TXN", csrf_token="CSRF", client_name="Claude",
+        client_id="c",
+        redirect_uri="https://claude.ai/cb",
+        scopes=["openid"],
+        txn_id="TXN",
+        csrf_token="CSRF",
+        client_name="Claude",
     )
     assert 'name="txn_id" value="TXN"' in html
     assert 'name="csrf_token" value="CSRF"' in html

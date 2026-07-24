@@ -65,9 +65,7 @@ def test_configure_server_for_http_uses_protocol_auth_required_scopes(monkeypatc
     monkeypatch.setattr(server_module, "get_transport_mode", lambda: "streamable-http")
     # Standard OAuth 2.1 mode now constructs AwGoogleProvider (GoogleProvider
     # plus the AW re-auth policy), imported inside configure_server_for_http.
-    monkeypatch.setattr(
-        "auth.aw_reauth_provider.AwGoogleProvider", FakeGoogleProvider
-    )
+    monkeypatch.setattr("auth.aw_reauth_provider.AwGoogleProvider", FakeGoogleProvider)
     monkeypatch.setattr(
         server_module,
         "get_current_scopes",
@@ -131,9 +129,7 @@ def test_configure_server_for_http_supports_public_client_with_jwt_key(monkeypat
     monkeypatch.setattr(server_module, "get_transport_mode", lambda: "streamable-http")
     # Standard OAuth 2.1 mode now constructs AwGoogleProvider (GoogleProvider
     # plus the AW re-auth policy), imported inside configure_server_for_http.
-    monkeypatch.setattr(
-        "auth.aw_reauth_provider.AwGoogleProvider", FakeGoogleProvider
-    )
+    monkeypatch.setattr("auth.aw_reauth_provider.AwGoogleProvider", FakeGoogleProvider)
     monkeypatch.setattr(
         server_module,
         "get_current_scopes",
