@@ -27,6 +27,7 @@ from auth.oauth_responses import (
     create_server_error_response,
 )
 from auth.scopes import PROTOCOL_AUTH_SCOPES, SCOPES, get_current_scopes  # noqa
+from auth.aw_policy_middleware import AwPolicyMiddleware
 from core.config import (
     USER_GOOGLE_EMAIL,
     get_transport_mode,
@@ -300,6 +301,11 @@ server = SecureFastMCP(
 auth_info_middleware = AuthInfoMiddleware()
 server.add_middleware(auth_info_middleware)
 
+# AW native parity: audit logging + email allowlist + re-auth policy enforcement.
+# Added after AuthInfoMiddleware so the authenticated identity is already resolved
+# on the context when this runs.
+server.add_middleware(AwPolicyMiddleware())
+
 
 def _parse_bool_env(value: str) -> bool:
     """Parse environment variable string to boolean."""
@@ -411,9 +417,10 @@ def configure_server_for_http():
             )
             valkey_host = os.getenv("WORKSPACE_MCP_OAUTH_PROXY_VALKEY_HOST", "").strip()
 
-            # Determine storage backend: valkey, disk, memory (default)
+            # Determine storage backend: firestore, valkey, disk, memory (default)
             use_valkey = storage_backend == "valkey" or bool(valkey_host)
             use_disk = storage_backend == "disk"
+            use_firestore = storage_backend == "firestore"
 
             if use_valkey:
                 try:
@@ -596,6 +603,50 @@ def configure_server_for_http():
                         "Falling back to default storage.",
                         exc,
                     )
+            elif use_firestore:
+                # AW native parity: Firestore-backed, Fernet-encrypted, hash-keyed
+                # client_storage so OAuth proxy sessions survive Cloud Run cold
+                # starts (the documented "silent re-auth" root cause). Mirrors the
+                # AW fleet pattern in aw_mcp_core/oauth.py.
+                try:
+                    from key_value.aio.stores.firestore import FirestoreStore
+                    from auth.aw_persistence import HashKeysWrapper
+
+                    firestore_collection = (
+                        os.getenv(
+                            "WORKSPACE_MCP_OAUTH_PROXY_FIRESTORE_COLLECTION", ""
+                        ).strip()
+                        or "workspace_mcp_oauth_proxy"
+                    )
+
+                    jwt_signing_key = validate_and_derive_jwt_key(
+                        jwt_signing_key_override, config.client_secret
+                    )
+                    storage_encryption_key = derive_jwt_key(
+                        high_entropy_material=jwt_signing_key.decode(),
+                        salt="fastmcp-storage-encryption-key",
+                    )
+                    client_storage = FernetEncryptionWrapper(
+                        key_value=HashKeysWrapper(
+                            FirestoreStore(default_collection=firestore_collection)
+                        ),
+                        fernet=Fernet(key=storage_encryption_key),
+                    )
+                    logger.info(
+                        "OAuth 2.1: Using FirestoreStore for FastMCP OAuth proxy client_storage (collection=%s)",
+                        firestore_collection,
+                    )
+                except Exception as exc:
+                    # Fail closed: Firestore was EXPLICITLY selected, so silently
+                    # dropping to in-memory would reintroduce the exact cold-start
+                    # session loss this workstream exists to fix. Refuse to start.
+                    raise RuntimeError(
+                        "OAuth 2.1: Firestore client_storage was explicitly requested "
+                        "(WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND=firestore) but could not "
+                        f"be initialized: {exc}. Install 'py-key-value-aio[firestore]' and "
+                        "ensure GCP Firestore access, or choose another backend. Refusing to "
+                        "start with a silent in-memory fallback."
+                    ) from exc
             elif storage_backend == "memory":
                 from key_value.aio.stores.memory import MemoryStore
 
@@ -635,7 +686,12 @@ def configure_server_for_http():
                     "Protected resource metadata points to Google's authorization server"
                 )
             else:
-                # Standard OAuth 2.1 mode: use FastMCP's GoogleProvider
+                # Standard OAuth 2.1 mode: AwGoogleProvider is FastMCP's
+                # GoogleProvider plus the AW 5-day/30-day re-auth policy enforced
+                # on the refresh path. Drop-in; per-user credential behaviour is
+                # unchanged.
+                from auth.aw_reauth_provider import AwGoogleProvider
+
                 allowed_client_redirect_uris = _parse_allowed_redirect_uris(
                     os.getenv("WORKSPACE_MCP_ALLOWED_CLIENT_REDIRECT_URIS")
                 )
@@ -644,7 +700,7 @@ def configure_server_for_http():
                         "OAuth 2.1: restricting DCR client redirect URIs to allowlist: %s",
                         allowed_client_redirect_uris,
                     )
-                provider = GoogleProvider(
+                provider = AwGoogleProvider(
                     client_id=config.client_id,
                     client_secret=config.client_secret,
                     base_url=config.get_oauth_base_url(),
@@ -678,6 +734,12 @@ def configure_server_for_http():
             # Always set auth provider for token validation in middleware
             set_auth_provider(provider)
             _auth_provider = provider
+
+            # AW native parity: persistent re-auth policy store (survives cold
+            # starts) + AW-branded consent page. Keyed off the same derived
+            # material as the OAuth proxy storage so a client-secret rotation
+            # invalidates everything together (matches fleet behaviour).
+            _configure_aw_native_parity(jwt_signing_key)
         except Exception as exc:
             logger.error(
                 "Failed to initialize FastMCP GoogleProvider: %s", exc, exc_info=True
@@ -697,6 +759,54 @@ def configure_server_for_http():
 def get_auth_provider() -> Optional[GoogleProvider]:
     """Gets the global authentication provider instance."""
     return _auth_provider
+
+
+_aw_consent_ready = False
+
+
+def _configure_aw_native_parity(jwt_signing_key: bytes) -> None:
+    """Set up the persistent re-auth policy store and AW-branded consent page.
+
+    Called once from configure_server_for_http after the OAuth provider is built.
+    Failures are logged but never abort startup: the server keeps working with
+    the re-auth policy disabled rather than refusing to serve.
+    """
+    global _aw_consent_ready
+
+    # Persistent re-auth policy store (Firestore by default, memory fallback).
+    try:
+        from fastmcp.server.auth.jwt_issuer import derive_jwt_key
+        from auth.aw_persistence import build_encrypted_store
+        from auth.aw_reauth import ReauthPolicyStore, set_reauth_store
+
+        reauth_collection = (
+            os.getenv("WORKSPACE_MCP_AW_REAUTH_COLLECTION", "").strip()
+            or "aw_reauth_policy"
+        )
+        reauth_key = derive_jwt_key(
+            high_entropy_material=jwt_signing_key.decode(),
+            salt="aw-reauth-policy-encryption-key",
+        )
+        backing = build_encrypted_store(
+            collection=reauth_collection, storage_encryption_key=reauth_key
+        )
+        set_reauth_store(ReauthPolicyStore(backing, collection=reauth_collection))
+        logger.info(
+            "AW re-auth policy store configured (collection=%s)", reauth_collection
+        )
+    except Exception as exc:
+        logger.error("Failed to configure AW re-auth policy store: %s", exc)
+
+    # AW-branded consent page + same-origin font asset route.
+    try:
+        from auth.aw_consent import install_branded_consent, register_consent_assets
+
+        install_branded_consent()
+        if not _aw_consent_ready:
+            register_consent_assets(server)
+            _aw_consent_ready = True
+    except Exception as exc:
+        logger.error("Failed to set up AW branded consent: %s", exc)
 
 
 @server.custom_route("/", methods=["GET"])

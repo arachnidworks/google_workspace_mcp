@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'self'; base-uri 'none'">
+<title>Application Access Request - ArachnidWorks</title>
+<style>
+  /* Mona Sans (variable) served same-origin from the MCP server */
+  @font-face {
+    font-family: "Mona Sans";
+    src: url("/aw-assets/mona-sans.ttf") format("truetype-variations"),
+         url("/aw-assets/mona-sans.ttf") format("truetype");
+    font-weight: 200 900;
+    font-stretch: 75% 125%;
+    font-style: normal;
+    font-display: swap;
+  }
+
+  :root {
+    --aw-black:  #111921;
+    --aw-claret: #8C2433;
+    --aw-coral:  #FF585D;
+    --gray-50:   #F7F7F7;
+    --gray-100:  #F5F5F5;
+    --gray-200:  #ECECEC;
+    --gray-600:  #666666;
+    --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--gray-100);
+    font-family: "Mona Sans", system-ui, sans-serif;
+    color: var(--aw-black);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 80px 24px 120px;
+  }
+  .font-expanded { font-variation-settings: "wdth" 125; }
+  a { color: var(--aw-claret); text-decoration: none; }
+  a:hover { color: var(--aw-coral); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .card {
+    width: 100%;
+    max-width: 544px;
+    background: #FFFFFF;
+    border: 1px solid var(--gray-200);
+    border-top: 4px solid var(--aw-claret);
+  }
+  .card-inner { padding: 48px 48px 40px; }
+
+  .header { display: flex; flex-direction: column; align-items: center; gap: 24px; text-align: center; }
+  .logo { height: 76px; width: auto; display: block; }
+  h1 { font-size: 30px; font-weight: 700; line-height: 1.1; letter-spacing: -0.01em; margin: 0; }
+
+  .intro { margin-top: 32px; background: var(--gray-50); border: 1px solid var(--gray-200); padding: 20px 22px; }
+  .intro p { font-size: 16px; font-weight: 300; line-height: 1.5; margin: 0; }
+
+  .verified {
+    margin-top: 16px; display: flex; align-items: center; justify-content: center; gap: 10px;
+    background: #FFFFFF; border: 1px solid var(--aw-claret); padding: 14px 18px;
+    font-size: 15px; font-weight: 300;
+  }
+  .verified svg { flex: none; }
+
+  .creds { margin-top: 16px; background: var(--gray-50); border: 1px solid var(--gray-200); padding: 18px 20px; }
+  .caps-label { font-size: 12px; font-weight: 700; letter-spacing: 0.10em; color: var(--gray-600); margin: 0 0 10px; }
+  .creds code { font-size: 14px; word-break: break-all; line-height: 1.4; }
+
+  details { margin-top: 24px; }
+  summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary .chev { transition: transform 120ms var(--ease); }
+  details[open] summary .chev { transform: rotate(90deg); }
+  .adv-title { font-size: 15px; font-weight: 600; }
+  .adv-body { margin-top: 16px; border-top: 1px solid var(--gray-200); padding-top: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .adv-row { display: flex; justify-content: space-between; gap: 16px; font-size: 14px; }
+  .adv-row span { color: var(--gray-600); }
+  .adv-row code { text-align: right; word-break: break-all; }
+
+  .actions { margin-top: 32px; display: flex; gap: 14px; justify-content: center; }
+  .btn {
+    appearance: none; cursor: pointer; font-family: "Mona Sans", sans-serif;
+    font-variation-settings: "wdth" 125; font-size: 16px; font-weight: 600;
+    padding: 14px 34px; border-radius: 50px; transition: all 120ms var(--ease);
+  }
+  .btn-primary { border: 1px solid var(--aw-claret); background: var(--aw-claret); color: #FFFFFF; }
+  .btn-primary:hover { background: #FFFFFF; color: var(--aw-claret); }
+  .btn-secondary { border: 1px solid var(--aw-black); background: #FFFFFF; color: var(--aw-black); }
+  .btn-secondary:hover { background: var(--aw-black); color: #FFFFFF; }
+
+  .why { position: fixed; bottom: 24px; right: 28px; font-size: 14px; font-weight: 300; color: var(--gray-600); text-decoration: underline; text-underline-offset: 3px; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="card-inner">
+
+      <div class="header">
+        <img class="logo" src="{{LOGO_SRC}}" alt="ArachnidWorks">
+        <h1 class="font-expanded">Application Access Request</h1>
+      </div>
+
+      <div class="intro">
+        <p>The application <a href="{{APP_URL}}">{{APP_NAME}}</a> wants to access the MCP server <a href="{{SERVER_URL}}" style="font-weight:600;">{{SERVER_NAME}}</a>. Please ensure you recognize the callback address below.</p>
+      </div>
+
+      <div class="verified">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8C2433" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        <span>Verified domain: <strong style="font-weight:700;">{{VERIFIED_DOMAIN}}</strong></span>
+      </div>
+
+      <div class="creds">
+        <p class="caps-label">CREDENTIALS WILL BE SENT TO</p>
+        <code>{{CALLBACK_URL}}</code>
+      </div>
+
+      <details>
+        <summary>
+          <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          <span class="font-expanded adv-title">Advanced Details</span>
+        </summary>
+        <div class="adv-body">
+          <div class="adv-row"><span>Redirect URI</span><code>{{CALLBACK_URL}}</code></div>
+          <div class="adv-row"><span>Response Type</span><code>{{RESPONSE_TYPE}}</code></div>
+          <div class="adv-row"><span>Scope</span><code>{{SCOPE}}</code></div>
+        </div>
+      </details>
+
+      <!-- Field names (txn_id, csrf_token, submit, action) match FastMCP's
+           OAuthProxy _submit_consent handler so the native OAuth flow is
+           preserved; only the presentation is AW-branded. -->
+      <form class="actions" method="post" action="{{CONSENT_ACTION}}">
+        <input type="hidden" name="txn_id" value="{{TXN_ID}}">
+        <input type="hidden" name="csrf_token" value="{{CSRF_TOKEN}}">
+        <input type="hidden" name="submit" value="true">
+        <button class="btn btn-primary" type="submit" name="action" value="approve">Allow Access</button>
+        <button class="btn btn-secondary" type="submit" name="action" value="deny">Deny</button>
+      </form>
+
+    </div>
+  </main>
+
+  <a class="why" href="{{HELP_URL}}">Why am I seeing this?</a>
+</body>
+</html>
