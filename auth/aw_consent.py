@@ -34,7 +34,12 @@ def brand_enabled() -> bool:
     """Branding is on by default; set WORKSPACE_MCP_BRAND=off to disable."""
     if not _AUTH_HTML.exists():
         return False
-    return os.getenv("WORKSPACE_MCP_BRAND", "on").strip().lower() not in ("off", "false", "0", "")
+    return os.getenv("WORKSPACE_MCP_BRAND", "on").strip().lower() not in (
+        "off",
+        "false",
+        "0",
+        "",
+    )
 
 
 @lru_cache(maxsize=1)
@@ -121,7 +126,9 @@ def install_branded_consent() -> bool:
     once. No-op (returns False) when branding is disabled or assets are missing.
     """
     if not brand_enabled():
-        logger.info("AW consent branding disabled or assets missing; using default consent page.")
+        logger.info(
+            "AW consent branding disabled or assets missing; using default consent page."
+        )
         return False
     try:
         from fastmcp.server.auth.oauth_proxy import consent as _consent_mod

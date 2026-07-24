@@ -38,25 +38,38 @@ class HashKeysWrapper:
         return await self.key_value.get(key=self._hash(key), collection=collection)
 
     async def get_many(self, keys, *, collection=None):
-        return await self.key_value.get_many(keys=[self._hash(k) for k in keys], collection=collection)
+        return await self.key_value.get_many(
+            keys=[self._hash(k) for k in keys], collection=collection
+        )
 
     async def put(self, key, value, *, collection=None, ttl=None):
-        return await self.key_value.put(key=self._hash(key), value=value, collection=collection, ttl=ttl)
+        return await self.key_value.put(
+            key=self._hash(key), value=value, collection=collection, ttl=ttl
+        )
 
     async def put_many(self, keys, values, *, collection=None, ttl=None):
-        return await self.key_value.put_many(keys=[self._hash(k) for k in keys], values=values, collection=collection, ttl=ttl)
+        return await self.key_value.put_many(
+            keys=[self._hash(k) for k in keys],
+            values=values,
+            collection=collection,
+            ttl=ttl,
+        )
 
     async def delete(self, key, *, collection=None):
         return await self.key_value.delete(key=self._hash(key), collection=collection)
 
     async def delete_many(self, keys, *, collection=None):
-        return await self.key_value.delete_many(keys=[self._hash(k) for k in keys], collection=collection)
+        return await self.key_value.delete_many(
+            keys=[self._hash(k) for k in keys], collection=collection
+        )
 
     async def ttl(self, key, *, collection=None):
         return await self.key_value.ttl(key=self._hash(key), collection=collection)
 
     async def ttl_many(self, keys, *, collection=None):
-        return await self.key_value.ttl_many(keys=[self._hash(k) for k in keys], collection=collection)
+        return await self.key_value.ttl_many(
+            keys=[self._hash(k) for k in keys], collection=collection
+        )
 
 
 def _build_firestore_backend(collection: str):

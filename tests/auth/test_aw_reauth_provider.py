@@ -62,16 +62,20 @@ def _install_super_stubs(monkeypatch, calls):
 
 def test_active_refresh_passes_through(monkeypatch):
     clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
-    store = ReauthPolicyStore(MemoryStore(), inactivity_days=5, max_days=30, clock=clock)
+    store = ReauthPolicyStore(
+        MemoryStore(), inactivity_days=5, max_days=30, clock=clock
+    )
     set_reauth_store(store)
     calls = []
     _install_super_stubs(monkeypatch, calls)
     provider = _StubProvider()
     try:
+
         async def go():
             await store.start(UID)
             result = await provider.exchange_refresh_token(None, _refresh_token(), [])
             assert result == "NEW_TOKENS"
+
         asyncio.run(go())
         assert calls == ["refresh"]  # super WAS called
     finally:
@@ -80,12 +84,15 @@ def test_active_refresh_passes_through(monkeypatch):
 
 def test_inactive_refresh_is_denied_and_does_not_call_super(monkeypatch):
     clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
-    store = ReauthPolicyStore(MemoryStore(), inactivity_days=5, max_days=30, clock=clock)
+    store = ReauthPolicyStore(
+        MemoryStore(), inactivity_days=5, max_days=30, clock=clock
+    )
     set_reauth_store(store)
     calls = []
     _install_super_stubs(monkeypatch, calls)
     provider = _StubProvider()
     try:
+
         async def go():
             await store.start(UID)
             clock.advance(days=6)  # exceed inactivity window
@@ -95,6 +102,7 @@ def test_inactive_refresh_is_denied_and_does_not_call_super(monkeypatch):
             # The denial is sticky: a retry is also denied, never silently OK.
             with pytest.raises(TokenError):
                 await provider.exchange_refresh_token(None, _refresh_token(), [])
+
         asyncio.run(go())
         assert calls == []  # super (upstream refresh) NEVER called -> no new tokens
     finally:
@@ -103,12 +111,15 @@ def test_inactive_refresh_is_denied_and_does_not_call_super(monkeypatch):
 
 def test_thirty_day_cap_denies_refresh_even_when_active(monkeypatch):
     clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
-    store = ReauthPolicyStore(MemoryStore(), inactivity_days=5, max_days=30, clock=clock)
+    store = ReauthPolicyStore(
+        MemoryStore(), inactivity_days=5, max_days=30, clock=clock
+    )
     set_reauth_store(store)
     calls = []
     _install_super_stubs(monkeypatch, calls)
     provider = _StubProvider()
     try:
+
         async def go():
             await store.start(UID)
             denied = False
@@ -121,6 +132,7 @@ def test_thirty_day_cap_denies_refresh_even_when_active(monkeypatch):
                     denied = True
                     break
             assert denied, "30-day cap must deny refresh even for an active user"
+
         asyncio.run(go())
     finally:
         set_reauth_store(None)
@@ -128,19 +140,26 @@ def test_thirty_day_cap_denies_refresh_even_when_active(monkeypatch):
 
 def test_authorization_code_starts_fresh_window(monkeypatch):
     clock = FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
-    store = ReauthPolicyStore(MemoryStore(), inactivity_days=5, max_days=30, clock=clock)
+    store = ReauthPolicyStore(
+        MemoryStore(), inactivity_days=5, max_days=30, clock=clock
+    )
     set_reauth_store(store)
     calls = []
     _install_super_stubs(monkeypatch, calls)
     provider = _StubProvider()
     try:
+
         async def go():
             # Before auth there is no window -> refresh denied.
-            assert (await store.check_and_slide(UID)) == ("reauth_required", "no_session")
+            assert (await store.check_and_slide(UID)) == (
+                "reauth_required",
+                "no_session",
+            )
             # A completed authorization opens a fresh window.
             token = await provider.exchange_authorization_code(None, None)
             assert token.access_token == "fastmcp.access.jwt"
             assert (await store.check_and_slide(UID)) == ("ok", "active")
+
         asyncio.run(go())
         assert calls == ["authcode"]
     finally:

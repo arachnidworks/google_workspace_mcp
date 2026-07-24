@@ -75,7 +75,9 @@ def test_explicit_firestore_fails_closed_when_unavailable(monkeypatch):
     import auth.aw_persistence as persistence
 
     monkeypatch.setenv("TEST_AW_BACKEND", "firestore")
-    monkeypatch.setattr(persistence, "_build_firestore_backend", lambda collection: None)
+    monkeypatch.setattr(
+        persistence, "_build_firestore_backend", lambda collection: None
+    )
     try:
         persistence.build_encrypted_store(
             collection="c",
@@ -93,7 +95,9 @@ def test_unset_backend_falls_back_to_memory(monkeypatch):
     import auth.aw_persistence as persistence
 
     monkeypatch.delenv("TEST_AW_BACKEND", raising=False)
-    monkeypatch.setattr(persistence, "_build_firestore_backend", lambda collection: None)
+    monkeypatch.setattr(
+        persistence, "_build_firestore_backend", lambda collection: None
+    )
     store = persistence.build_encrypted_store(
         collection="c",
         storage_encryption_key=Fernet.generate_key(),

@@ -85,7 +85,9 @@ class ReauthPolicyStore:
     ):
         self._store = store
         self._collection = collection
-        self._inactivity_days = inactivity_days if inactivity_days is not None else get_inactivity_days()
+        self._inactivity_days = (
+            inactivity_days if inactivity_days is not None else get_inactivity_days()
+        )
         self._max_days = max_days if max_days is not None else get_max_days()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
@@ -149,7 +151,9 @@ class ReauthPolicyStore:
         session_start = _parse(record.get("session_start")) or self._now()
         await self._write(key, session_start, self._now())
 
-    async def _write(self, key: str, session_start: datetime, last_used: datetime) -> None:
+    async def _write(
+        self, key: str, session_start: datetime, last_used: datetime
+    ) -> None:
         # TTL to the absolute cap so the record outlives the inactivity window:
         # inactivity is enforced by the explicit last_used check while the record
         # is alive, and a missing record means the session is older than the cap
