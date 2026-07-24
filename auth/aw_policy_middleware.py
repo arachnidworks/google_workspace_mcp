@@ -83,10 +83,18 @@ def _check_allowlist(email: Optional[str]) -> Optional[str]:
         )
     if not email:
         return "Error: Could not determine your identity. Please reconnect the MCP integration."
-    allowed = {e.strip().lower() for e in allowed_raw.split(",") if e.strip()}
-    if email.lower() not in allowed:
-        return f"Error: Access denied. {email} is not authorized to use this MCP. Contact your admin."
-    return None
+    entries = {e.strip().lower() for e in allowed_raw.split(",") if e.strip()}
+    email_lower = email.lower()
+    # Domain of the email = part after the LAST "@" (only if an "@" is present).
+    domain = email_lower.rsplit("@", 1)[-1] if "@" in email_lower else None
+    for entry in entries:
+        if entry.startswith("@"):
+            # Domain wildcard: true domain equality, never a substring match.
+            if domain and domain == entry[1:]:
+                return None
+        elif entry == email_lower:
+            return None
+    return f"Error: Access denied. {email} is not authorized to use this MCP. Contact your admin."
 
 
 async def _slide_activity() -> None:
