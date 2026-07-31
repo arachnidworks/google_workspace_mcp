@@ -8,7 +8,7 @@ import base64
 import logging
 import asyncio
 import ssl
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import httpx
 from googleapiclient.errors import HttpError
@@ -19,74 +19,27 @@ from mcp.types import ToolAnnotations
 from auth.service_decorator import require_google_service, require_multiple_services
 from core.server import server
 from core.utils import TransientNetworkError, handle_http_errors
+from gchat.space_naming import (
+    resolve_identity,
+    resolve_self_user_id,
+    resolve_space_label,
+)
 
 logger = logging.getLogger(__name__)
 
-# In-memory cache for user ID → display name (bounded to avoid unbounded growth)
-_SENDER_CACHE_MAX_SIZE = 256
-_sender_name_cache: Dict[str, str] = {}
 _SEARCH_MESSAGES_MAX_CONCURRENT_SPACE_FETCHES = 1
 _SEARCH_MESSAGES_SSL_RETRIES = 3
 _SEARCH_MESSAGES_RETRY_BASE_DELAY_SECONDS = 1
 
 
-def _cache_sender(user_id: str, name: str) -> None:
-    """Store a resolved sender name, evicting oldest entries if cache is full."""
-    if len(_sender_name_cache) >= _SENDER_CACHE_MAX_SIZE:
-        to_remove = list(_sender_name_cache.keys())[: _SENDER_CACHE_MAX_SIZE // 2]
-        for k in to_remove:
-            del _sender_name_cache[k]
-    _sender_name_cache[user_id] = name
-
-
 async def _resolve_sender(people_service, sender_obj: dict) -> str:
     """Resolve a Chat message sender to a display name.
 
-    Fast path: use displayName if the API already provided it.
-    Slow path: look up the user via the People API directory and cache the result.
+    Thin wrapper over the shared identity resolver in gchat.space_naming. Kept
+    here (importable at gchat.chat_tools._resolve_sender) so get_messages /
+    search_messages and their tests keep their existing behavior unchanged.
     """
-    # Fast path — Chat API sometimes provides displayName directly
-    display_name = sender_obj.get("displayName")
-    if display_name:
-        return display_name
-
-    user_id = sender_obj.get("name", "")  # e.g. "users/123456789"
-    if not user_id:
-        return "Unknown Sender"
-
-    # Check cache
-    if user_id in _sender_name_cache:
-        return _sender_name_cache[user_id]
-
-    # Try People API directory lookup
-    # Chat API uses "users/ID" but People API expects "people/ID"
-    people_resource = user_id.replace("users/", "people/", 1)
-    if people_service:
-        try:
-            person = await asyncio.to_thread(
-                people_service.people()
-                .get(resourceName=people_resource, personFields="names,emailAddresses")
-                .execute
-            )
-            names = person.get("names", [])
-            if names:
-                resolved = names[0].get("displayName", user_id)
-                _cache_sender(user_id, resolved)
-                return resolved
-            # Fall back to email if no name
-            emails = person.get("emailAddresses", [])
-            if emails:
-                resolved = emails[0].get("value", user_id)
-                _cache_sender(user_id, resolved)
-                return resolved
-        except HttpError as e:
-            logger.debug(f"People API lookup failed for {user_id}: {e}")
-        except Exception as e:
-            logger.debug(f"Unexpected error resolving {user_id}: {e}")
-
-    # Final fallback
-    _cache_sender(user_id, user_id)
-    return user_id
+    return await resolve_identity(people_service, sender_obj)
 
 
 async def _execute_chat_request(
@@ -144,16 +97,41 @@ def _extract_rich_links(msg: dict) -> List[str]:
         openWorldHint=True,
     ),
 )
-@require_google_service("chat", "chat_spaces_readonly")
+@require_multiple_services(
+    [
+        # Only chat_spaces_readonly is gated here. chat.memberships.readonly is
+        # requested at consent (in CHAT_SCOPES) but NOT required, so tokens that
+        # haven't re-consented still run the tool; members.list then 403s and
+        # resolve_space_label degrades (DM -> message-sender fallback, group ->
+        # "Unnamed Group Chat"), per Design F.
+        {
+            "service_type": "chat",
+            "scopes": ["chat_spaces_readonly"],
+            "param_name": "chat_service",
+        },
+        {
+            "service_type": "people",
+            "scopes": "contacts_read",
+            "param_name": "people_service",
+        },
+    ]
+)
 @handle_http_errors("list_spaces", service_type="chat")
 async def list_spaces(
-    service,
+    chat_service,
+    people_service,
     user_google_email: str,
     page_size: int = 100,
     space_type: str = "all",  # "all", "room", "dm"
+    resolve_names: bool = True,
 ) -> str:
     """
     Lists Google Chat spaces (rooms and direct messages) accessible to the user.
+
+    Args:
+        resolve_names: When True (default), resolve participant names so DMs and
+                       group chats get human-readable labels. Set False for a
+                       faster bare listing that skips per-space member lookups.
 
     Returns:
         str: A formatted list of Google Chat spaces accessible to the user.
@@ -163,27 +141,119 @@ async def list_spaces(
     # Build filter based on space_type
     filter_param = None
     if space_type == "room":
-        filter_param = "spaceType = SPACE"
+        filter_param = 'spaceType = "SPACE"'
     elif space_type == "dm":
-        filter_param = "spaceType = DIRECT_MESSAGE"
+        filter_param = 'spaceType = "DIRECT_MESSAGE"'
 
     request_params = {"pageSize": page_size}
     if filter_param:
         request_params["filter"] = filter_param
 
-    response = await asyncio.to_thread(service.spaces().list(**request_params).execute)
+    response = await asyncio.to_thread(
+        chat_service.spaces().list(**request_params).execute
+    )
 
     spaces = response.get("spaces", [])
     if not spaces:
         return f"No Chat spaces found for type '{space_type}'."
 
+    self_user_id = (
+        await resolve_self_user_id(people_service, user_google_email)
+        if resolve_names
+        else None
+    )
+
     output = [f"Found {len(spaces)} Chat spaces (type: {space_type}):"]
+    # ponytail: naming does O(N) sequential API calls (messages.list per DM/group, +members.list for groups); googleapiclient objects aren't thread-safe to fan out. Fine at tens of spaces; add a cap/pagination if a workspace has hundreds.
     for space in spaces:
-        space_name = space.get("displayName", "Unnamed Space")
+        if resolve_names:
+            space_name = await resolve_space_label(
+                chat_service, people_service, space, self_user_id
+            )
+        else:
+            space_name = space.get("displayName", "Unnamed Space")
         space_id = space.get("name", "")
         space_type_actual = space.get("spaceType", "UNKNOWN")
         output.append(f"- {space_name} (ID: {space_id}, Type: {space_type_actual})")
 
+    return "\n".join(output)
+
+
+@server.tool(
+    title="Find Direct Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+@require_multiple_services(
+    [
+        # Only chat_spaces_readonly is gated here. chat.memberships.readonly is
+        # requested at consent (in CHAT_SCOPES) but NOT required, so tokens that
+        # haven't re-consented still run the tool; members.list then 403s and
+        # resolve_space_label degrades (DM -> message-sender fallback, group ->
+        # "Unnamed Group Chat"), per Design F.
+        {
+            "service_type": "chat",
+            "scopes": ["chat_spaces_readonly"],
+            "param_name": "chat_service",
+        },
+        {
+            "service_type": "people",
+            "scopes": "contacts_read",
+            "param_name": "people_service",
+        },
+    ]
+)
+@handle_http_errors("find_direct_message", is_read_only=True, service_type="chat")
+async def find_direct_message(
+    chat_service,
+    people_service,
+    user_google_email: str,
+    query: str,
+) -> str:
+    """
+    Finds Google Chat direct messages (DMs) by the other participant's name.
+
+    Lists DM spaces only, resolves each to the other participant's name, and
+    returns those whose label contains the query (case-insensitive substring).
+
+    Args:
+        query: Text to match against the resolved DM participant name.
+
+    Returns:
+        str: Matching DM space id(s) and labels, or a not-found message.
+    """
+    logger.info(f"[find_direct_message] Email={user_google_email}, Query='{query}'")
+
+    response = await asyncio.to_thread(
+        chat_service.spaces()
+        .list(filter='spaceType = "DIRECT_MESSAGE"', pageSize=100)
+        .execute
+    )
+    spaces = response.get("spaces", [])
+    if not spaces:
+        return "No direct messages found."
+
+    self_user_id = await resolve_self_user_id(people_service, user_google_email)
+
+    query_lower = query.lower()
+    matches = []
+    for space in spaces:
+        label = await resolve_space_label(
+            chat_service, people_service, space, self_user_id
+        )
+        if query_lower in label.lower():
+            matches.append((label, space.get("name", "")))
+
+    if not matches:
+        return f"No direct messages found matching '{query}'."
+
+    output = [f"Found {len(matches)} direct message(s) matching '{query}':"]
+    for label, space_id in matches:
+        output.append(f"- {label} (ID: {space_id})")
     return "\n".join(output)
 
 
