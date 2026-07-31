@@ -2,7 +2,7 @@ name: AW Sync Upstream (tested)
 
 # Weekly: pull taylorwilsdon/google_workspace_mcp into this fork's main,
 # run the same CI as upstream (ruff + pytest), and only push if green.
-# Deploy to Cloud Run stays a human-gated step — this job just keeps the
+# Deploy to Cloud Run stays a human-gated step - this job just keeps the
 # fork current and opens an issue when a new tested version is ready.
 
 on:
@@ -39,13 +39,14 @@ jobs:
           echo "main is $BEHIND commit(s) behind upstream/main"
 
       - name: Merge upstream onto main
+        id: merge
         if: steps.check.outputs.behind != '0'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Our only local change is this workflow file, which upstream never
-          # touches, so this merge is clean. If it ever conflicts, the job
-          # fails loudly (someone committed real changes to the fork).
+          # The fork carries local changes (this workflow plus the Chat-naming
+          # patch). A conflict here is expected when upstream edits the patched
+          # files; the job fails loudly and the failure report explains the fix.
           git merge --no-edit upstream/main
 
       - name: Install uv
@@ -67,6 +68,7 @@ jobs:
         run: uvx ruff check
 
       - name: Pytest
+        id: pytest
         if: steps.check.outputs.behind != '0'
         run: uv run pytest
 
@@ -76,23 +78,37 @@ jobs:
 
       # Issues are disabled on this fork, so notify via the run summary.
       # GitHub also emails the workflow owner automatically on failure.
-      - name: Report — ready to deploy
+      - name: Report - ready to deploy
         if: steps.check.outputs.behind != '0'
         run: |
           VER=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
           {
-            echo "## ✅ Upstream synced to v${VER} — tested, ready to deploy"
+            echo "## ✅ Upstream synced to v${VER} - tested, ready to deploy"
             echo ""
             echo "Fork \`main\` was synced to upstream and passed ruff + pytest, then pushed."
-            echo "Deploy to Cloud Run is **gated and manual** — follow the internal deploy runbook,"
+            echo "Deploy to Cloud Run is **gated and manual** - follow the internal deploy runbook,"
             echo "then bump the \`google_workspace_mcp\` submodule pointer in aw-claude-mcps."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Report — sync failed
+      - name: Report - sync failed
         if: failure() && steps.check.outputs.behind != '0'
         run: |
           {
-            echo "## ❌ Upstream sync FAILED — fork NOT updated"
+            echo "## 🚨 ACTION REQUIRED - AW fork sync needs a human"
             echo ""
-            echo "Merge conflict or red tests. \`main\` was left unchanged; investigate before deploying."
+            if [ "${{ steps.merge.outcome }}" = "failure" ]; then
+              echo "### Merge conflict"
+              echo ""
+              echo "Almost certainly on AW's carried Chat-naming patch (\`gchat/space_naming.py\` plus small hooks in \`chat_tools.py\`/\`scopes.py\`). This is expected whenever upstream edits those files."
+              echo ""
+              echo "Resolve keeping BOTH the upstream changes AND our patch, run \`uv run pytest\`, then push."
+            elif [ "${{ steps.pytest.outcome }}" = "failure" ]; then
+              echo "### Tests failed"
+              echo ""
+              echo "An upstream change broke our tests. Fork \`main\` is unchanged and nothing was deployed. Investigate before deploying."
+            else
+              echo "Sync failed before the merge/test steps. Fork \`main\` is unchanged and nothing was deployed."
+            fi
+            echo ""
+            echo "Safe state: fork \`main\` was left unchanged and nothing was deployed."
           } >> "$GITHUB_STEP_SUMMARY"
