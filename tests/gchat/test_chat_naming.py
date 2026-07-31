@@ -199,7 +199,13 @@ async def test_self_excluded_from_labels():
     chat_service = Mock()
     chat_service.spaces().messages().list().execute.return_value = {
         "messages": [
-            {"sender": {"name": "users/self", "type": "HUMAN", "displayName": "MySelf"}},
+            {
+                "sender": {
+                    "name": "users/self",
+                    "type": "HUMAN",
+                    "displayName": "MySelf",
+                }
+            },
             {"sender": {"name": "users/30", "type": "HUMAN", "displayName": "Other"}},
         ]
     }
@@ -337,7 +343,9 @@ async def test_spacetype_filters_are_quoted():
         user_google_email="test@example.com",
         query="x",
     )
-    assert chat.spaces().list.call_args.kwargs["filter"] == 'spaceType = "DIRECT_MESSAGE"'
+    assert (
+        chat.spaces().list.call_args.kwargs["filter"] == 'spaceType = "DIRECT_MESSAGE"'
+    )
 
     # list_spaces(space_type="dm") -> quoted DM filter
     chat = Mock()
@@ -348,7 +356,9 @@ async def test_spacetype_filters_are_quoted():
         user_google_email="test@example.com",
         space_type="dm",
     )
-    assert chat.spaces().list.call_args.kwargs["filter"] == 'spaceType = "DIRECT_MESSAGE"'
+    assert (
+        chat.spaces().list.call_args.kwargs["filter"] == 'spaceType = "DIRECT_MESSAGE"'
+    )
 
     # list_spaces(space_type="room") -> quoted SPACE filter
     chat = Mock()
