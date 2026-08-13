@@ -17,7 +17,6 @@ PROJECT_ID="${PROJECT_ID:-idyllic-kiln-489511-t4}"
 PROJECT_NUMBER="${PROJECT_NUMBER:-420082496003}"
 REGION="${REGION:-us-central1}"
 SERVICE="${SERVICE:-workspace-mcp}"
-RUNTIME_SA="${RUNTIME_SA:-${PROJECT_NUMBER}-compute@developer.gserviceaccount.com}"
 
 # --- Preview (--tag dev) support: build a no-traffic tagged revision ----------
 DEPLOY_TAG=""
@@ -35,23 +34,11 @@ echo "== Enabling required APIs =="
 gcloud services enable secretmanager.googleapis.com firestore.googleapis.com \
   --project "$PROJECT_ID"
 
-# Create (or add a new version to) a secret, value read from an env var.
-upsert_secret() {
-  local name="$1" value="$2"
-  if gcloud secrets describe "$name" --project "$PROJECT_ID" >/dev/null 2>&1; then
-    printf %s "$value" | gcloud secrets versions add "$name" --data-file=- --project "$PROJECT_ID" >/dev/null
-  else
-    printf %s "$value" | gcloud secrets create "$name" --data-file=- --replication-policy=automatic --project "$PROJECT_ID" >/dev/null
-  fi
-  gcloud secrets add-iam-policy-binding "$name" \
-    --member="serviceAccount:${RUNTIME_SA}" \
-    --role="roles/secretmanager.secretAccessor" \
-    --project "$PROJECT_ID" >/dev/null 2>&1 || true
-  echo "  secret ready: $name"
-}
-
-echo "== Upserting secrets =="
-upsert_secret google-oauth-client-secret "$GOOGLE_OAUTH_CLIENT_SECRET"
+# This script deliberately does NOT create or update secret versions. Deploying
+# and rotating are separate jobs: a deploy that also writes the secret it is
+# about to mount will serve an unreviewed value, which is how a bad value
+# reaches production without anyone approving it. Provision and rotate
+# google-oauth-client-secret out of band, then set OAUTH_SECRET_VERSION below.
 
 # ALLOWED_EMAILS is a comma-separated list, so use gcloud's custom-delimiter
 # syntax (^##^) to avoid gcloud splitting the value on commas.
@@ -72,7 +59,10 @@ ENV_VARS+="##WORKSPACE_MCP_BRAND_HELP_URL=${WORKSPACE_MCP_BRAND_HELP_URL:-https:
 ENV_VARS+="##TOOLS=${TOOLS:-gmail calendar drive docs sheets}"
 ENV_VARS+="##TOOL_TIER=${TOOL_TIER:-core}"
 
-SECRETS="GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:latest"
+# Pinned to an explicit numeric version, never a floating alias. An alias means a
+# new secret version changes what production serves with no deploy having
+# happened, which is exactly the outage this fleet already had once.
+SECRETS="GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:${OAUTH_SECRET_VERSION:-29}"
 
 echo "== Deploying to Cloud Run =="
 gcloud run deploy "$SERVICE" \
