@@ -2575,6 +2575,7 @@ async def manage_doc_tab(
     parent_tab_id: Optional[str] = None,
     markdown_text: Optional[str] = None,
     replace_existing: bool = True,
+    link_color: Optional[str] = None,
 ) -> ManageDocTabResponse:
     """
     Manage document tabs: create, rename, delete, or populate from Markdown.
@@ -2589,6 +2590,7 @@ async def manage_doc_tab(
         parent_tab_id: Optional parent tab ID to nest under (create only)
         markdown_text: Markdown source to render (populate_from_markdown only)
         replace_existing: Clear tab body before inserting markdown (default True)
+        link_color: Optional #RRGGBB applied to every link (populate_from_markdown only)
 
     Returns:
         dict with action result including document link
@@ -2711,13 +2713,20 @@ async def manage_doc_tab(
                     }
                 }
             )
-        all_requests.extend(markdown_to_docs_requests(markdown_text, tab_id=tab_id))
+        all_requests.extend(
+            markdown_to_docs_requests(
+                markdown_text, tab_id=tab_id, link_color=link_color
+            )
+        )
     else:
         # Append after existing content instead of prepending at index 1.
         insert_at = tab_end - 1 if tab_end > 2 else 1
         all_requests.extend(
             markdown_to_docs_requests(
-                markdown_text, tab_id=tab_id, start_index=insert_at
+                markdown_text,
+                tab_id=tab_id,
+                start_index=insert_at,
+                link_color=link_color,
             )
         )
 

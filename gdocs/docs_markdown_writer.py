@@ -19,11 +19,14 @@ from typing import Optional
 
 from markdown_it import MarkdownIt
 
+from gdocs.docs_helpers import _normalize_color
+
 
 def markdown_to_docs_requests(
     markdown_text: str,
     tab_id: Optional[str] = None,
     start_index: int = 1,
+    link_color: Optional[str] = None,
 ) -> list[dict]:
     """Convert markdown to a list of Docs API batchUpdate request dicts.
 
@@ -31,6 +34,7 @@ def markdown_to_docs_requests(
         markdown_text - the markdown source
         tab_id - optional tab ID; when provided, every range targets this tab
         start_index - document index at which content insertion begins
+        link_color - optional #RRGGBB foreground color applied to every link
 
     Returns:
         Ordered list of request dicts. Empty list for empty input.
@@ -42,11 +46,11 @@ def markdown_to_docs_requests(
     tokens = md.parse(markdown_text)
 
     requests: list[dict] = []
-    _emit_requests(tokens, requests, tab_id, start_index)
+    _emit_requests(tokens, requests, tab_id, start_index, link_color)
     return requests
 
 
-def _emit_requests(tokens, requests, tab_id, start_index):
+def _emit_requests(tokens, requests, tab_id, start_index, link_color=None):
     """Walk markdown-it tokens and append Docs API requests.
 
     Maintains a running `cursor` that represents the current insertion point
@@ -62,7 +66,7 @@ def _emit_requests(tokens, requests, tab_id, start_index):
             level = int(tok.tag[1])  # 'h1' -> 1
             inline_tok = tokens[i + 1]
             text, inline_styles = _render_inline_with_styles(
-                inline_tok.children or [], cursor[0], tab_id
+                inline_tok.children or [], cursor[0], tab_id, link_color
             )
             text += "\n"
             range_start = cursor[0]
@@ -105,7 +109,7 @@ def _emit_requests(tokens, requests, tab_id, start_index):
                     if k + 2 < j and tokens[k + 2].type == "inline":
                         inline_tok = tokens[k + 2]
                         text, inline_styles = _render_inline_with_styles(
-                            inline_tok.children or [], cursor[0], tab_id
+                            inline_tok.children or [], cursor[0], tab_id, link_color
                         )
                         text += "\n"
                         requests.append(_build_insert_text(cursor[0], text, tab_id))
@@ -180,7 +184,7 @@ def _emit_requests(tokens, requests, tab_id, start_index):
                 ):
                     inline_tok = tokens[k + 1]
                     text, inline_styles = _render_inline_with_styles(
-                        inline_tok.children or [], cursor[0], tab_id
+                        inline_tok.children or [], cursor[0], tab_id, link_color
                     )
                     text += "\n"
                     requests.append(_build_insert_text(cursor[0], text, tab_id))
@@ -222,7 +226,7 @@ def _emit_requests(tokens, requests, tab_id, start_index):
             # paragraph_open is followed by inline (children), then paragraph_close
             inline_tok = tokens[i + 1]
             text, inline_styles = _render_inline_with_styles(
-                inline_tok.children or [], cursor[0], tab_id
+                inline_tok.children or [], cursor[0], tab_id, link_color
             )
             text += "\n"
             requests.append(_build_insert_text(cursor[0], text, tab_id))
@@ -243,6 +247,7 @@ def _render_inline_with_styles(
     children,
     base_index: int,
     tab_id: Optional[str],
+    link_color: Optional[str] = None,
 ) -> tuple[str, list[dict]]:
     """Walk inline tokens, returning plain text and style requests.
 
@@ -250,6 +255,7 @@ def _render_inline_with_styles(
         children - inline tokens from markdown-it
         base_index - the document index where this inline block starts
         tab_id - optional tab ID for ranges
+        link_color - optional #RRGGBB foreground color for links
 
     Returns:
         (plain_text, style_requests). The caller emits insertText with
@@ -312,12 +318,23 @@ def _render_inline_with_styles(
                 if stack[idx][0] == "link_open":
                     _, start_local, href = stack.pop(idx)
                     if href:
+                        link_style = {"link": {"url": href}}
+                        link_fields = "link"
+                        if link_color:
+                            link_style["foregroundColor"] = {
+                                "color": {
+                                    "rgbColor": _normalize_color(
+                                        link_color, "link_color"
+                                    )
+                                }
+                            }
+                            link_fields = "link,foregroundColor"
                         _append_text_style(
                             style_requests,
                             base_index + start_local,
                             base_index + local_pos,
-                            {"link": {"url": href}},
-                            "link",
+                            link_style,
+                            link_fields,
                             tab_id,
                         )
                     break
