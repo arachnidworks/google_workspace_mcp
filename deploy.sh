@@ -29,6 +29,7 @@ fi
 
 # Load local (gitignored) config.
 set -a; source ./.env; set +a
+URL="${WORKSPACE_EXTERNAL_URL:-https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app}"
 
 echo "== Enabling required APIs =="
 gcloud services enable secretmanager.googleapis.com firestore.googleapis.com \
@@ -43,6 +44,8 @@ gcloud services enable secretmanager.googleapis.com firestore.googleapis.com \
 # ALLOWED_EMAILS is a comma-separated list, so use gcloud's custom-delimiter
 # syntax (^##^) to avoid gcloud splitting the value on commas.
 ENV_VARS="^##^MCP_ENABLE_OAUTH21=true"
+ENV_VARS+="##WORKSPACE_MCP_STATELESS_MODE=true"
+ENV_VARS+="##WORKSPACE_EXTERNAL_URL=${URL}"
 ENV_VARS+="##SERVICE_NAME=${SERVICE}"
 ENV_VARS+="##ALLOWED_EMAILS=${ALLOWED_EMAILS}"
 ENV_VARS+="##GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}"
@@ -53,17 +56,21 @@ ENV_VARS+="##WORKSPACE_MCP_AW_REAUTH_COLLECTION=aw_reauth_policy"
 ENV_VARS+="##REAUTH_INACTIVITY_DAYS=${REAUTH_INACTIVITY_DAYS:-5}"
 ENV_VARS+="##REAUTH_MAX_DAYS=${REAUTH_MAX_DAYS:-30}"
 ENV_VARS+="##WORKSPACE_MCP_BRAND=on"
-ENV_VARS+="##WORKSPACE_MCP_BRAND_VERIFIED_DOMAIN=${WORKSPACE_MCP_BRAND_VERIFIED_DOMAIN:-claude.ai}"
-ENV_VARS+="##WORKSPACE_MCP_BRAND_HELP_URL=${WORKSPACE_MCP_BRAND_HELP_URL:-https://arachnidworks.com/mcp-help}"
-# Blast-radius limits from the fleet review (section 7): restrict tools/scopes.
-ENV_VARS+="##TOOLS=${TOOLS:-gmail calendar drive docs sheets}"
-ENV_VARS+="##TOOL_TIER=${TOOL_TIER:-core}"
+ENV_VARS+="##WORKSPACE_MCP_BRAND_VERIFIED_DOMAIN=${WORKSPACE_MCP_BRAND_VERIFIED_DOMAIN:-arachnidworks.com}"
+ENV_VARS+="##WORKSPACE_MCP_BRAND_HELP_URL=${WORKSPACE_MCP_BRAND_HELP_URL:-https://arachnidworks.com}"
+# 10 services, enabled 2026-07-22. No TOOL_TIER: a tier is a per-tool allowlist
+# and drops tools the team uses.
+ENV_VARS+="##TOOLS=${TOOLS:-gmail calendar drive docs sheets slides chat forms tasks contacts}"
 
 # Pinned to an explicit numeric version, never a floating alias. An alias means a
 # new secret version changes what production serves with no deploy having
 # happened, which is exactly the outage this fleet already had once.
 SECRETS="GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:${OAUTH_SECRET_VERSION:-29}"
 
+# Scaling note: the warm-instance minimum lives on the SERVICE
+# (`gcloud run services update --min 1`), not here. Do not add --min-instances:
+# that is revision-level and would pin a warm instance for every tagged preview
+# revision, which is what caused the Aug 2026 Cloud Run overspend.
 echo "== Deploying to Cloud Run =="
 gcloud run deploy "$SERVICE" \
   --source . \
@@ -72,7 +79,7 @@ gcloud run deploy "$SERVICE" \
   --allow-unauthenticated \
   --set-env-vars "$ENV_VARS" \
   --set-secrets "$SECRETS" \
-  "${NO_TRAFFIC_ARGS[@]}"
+  ${NO_TRAFFIC_ARGS[@]+"${NO_TRAFFIC_ARGS[@]}"}
 
 if [[ -n "$DEPLOY_TAG" ]]; then
   TAG_URL=$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" \
@@ -83,11 +90,6 @@ if [[ -n "$DEPLOY_TAG" ]]; then
   echo "GOOGLE_OAUTH client, set WORKSPACE_EXTERNAL_URL on the dev revision, then verify at the tagged URL."
   exit 0
 fi
-
-URL=$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format="value(status.url)")
-echo "== Setting WORKSPACE_EXTERNAL_URL=$URL =="
-gcloud run services update "$SERVICE" --project "$PROJECT_ID" --region "$REGION" \
-  --update-env-vars "WORKSPACE_EXTERNAL_URL=${URL}" >/dev/null
 
 echo ""
 echo "Deployed: $URL"
