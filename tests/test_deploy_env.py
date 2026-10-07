@@ -56,17 +56,26 @@ def test_deploy_sets_live_env_in_one_revision(tmp_path):
     raw = _flag(deploys[0], "--set-env-vars")
     assert raw.startswith("^##^")
     env = dict(kv.split("=", 1) for kv in raw[4:].split("##"))
-    assert env["ALLOWED_EMAILS"] == "a@example.com,b@example.com"
-    assert env["WORKSPACE_MCP_STATELESS_MODE"] == "true"
-    assert "TOOL_TIER" not in env
-    assert env["TOOLS"] == (
-        "gmail calendar drive docs sheets slides chat forms tasks contacts"
-    )
-    assert env["WORKSPACE_MCP_BRAND_VERIFIED_DOMAIN"] == "arachnidworks.com"
-    assert env["WORKSPACE_MCP_BRAND_HELP_URL"] == "https://arachnidworks.com"
-    assert env["WORKSPACE_EXTERNAL_URL"] == (
-        "https://workspace-mcp-420082496003.us-central1.run.app"
-    )
+    # Exact match: --set-env-vars replaces the whole env, so any missing or
+    # extra key is a change to live.
+    assert env == {
+        "MCP_ENABLE_OAUTH21": "true",
+        "WORKSPACE_MCP_STATELESS_MODE": "true",
+        "SERVICE_NAME": "workspace-mcp",
+        "ALLOWED_EMAILS": "a@example.com,b@example.com",
+        "GOOGLE_OAUTH_CLIENT_ID": "client-id",
+        "WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND": "firestore",
+        "WORKSPACE_MCP_OAUTH_PROXY_FIRESTORE_COLLECTION": "workspace_mcp_oauth_proxy",
+        "WORKSPACE_MCP_AW_STORE_BACKEND": "firestore",
+        "WORKSPACE_MCP_AW_REAUTH_COLLECTION": "aw_reauth_policy",
+        "REAUTH_INACTIVITY_DAYS": "5",
+        "REAUTH_MAX_DAYS": "30",
+        "WORKSPACE_MCP_BRAND": "on",
+        "WORKSPACE_MCP_BRAND_VERIFIED_DOMAIN": "arachnidworks.com",
+        "WORKSPACE_MCP_BRAND_HELP_URL": "https://arachnidworks.com",
+        "TOOLS": "gmail calendar drive docs sheets slides chat forms tasks contacts",
+        "WORKSPACE_EXTERNAL_URL": "https://workspace-mcp-420082496003.us-central1.run.app",
+    }
     assert _flag(deploys[0], "--set-secrets") == (
         "GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:29"
     )
