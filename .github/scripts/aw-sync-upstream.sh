@@ -56,6 +56,8 @@ if [ -n "$DRY_RUN" ]; then
   echo "DRY RUN: tag=$TAG conflict=$CONFLICT"; echo "$TITLE"; echo "$BODY"; exit 0
 fi
 
+# gh would otherwise resolve the upstream remote as the target repo.
+: "${GH_REPO:?set GH_REPO to this fork (owner/name)}"
 git push --force origin "$BRANCH"
 if PR=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number') && [ -n "$PR" ]; then
   gh pr edit "$PR" --title "$TITLE" --body "$BODY"

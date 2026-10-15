@@ -28,4 +28,6 @@ jobs:
       - name: Merge newest upstream release and open PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The script adds an `upstream` remote; pin gh to this fork so it never targets upstream.
+          GH_REPO: ${{ github.repository }}
         run: .github/scripts/aw-sync-upstream.sh
