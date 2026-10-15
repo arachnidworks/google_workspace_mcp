@@ -1,17 +1,18 @@
-name: AW Sync Upstream (tested)
+name: AW Sync Upstream
 
-# Weekly: pull taylorwilsdon/google_workspace_mcp into this fork's main,
-# run the same CI as upstream (ruff + pytest), and only push if green.
-# Deploy to Cloud Run stays a human-gated step - this job just keeps the
-# fork current and opens an issue when a new tested version is ready.
+# GitHub cannot trigger a workflow from another repo's release, so poll: each
+# run finds the newest upstream release tag not yet in main, merges it into
+# sync/upstream and opens (or updates) a PR into main with chad-aw as reviewer.
+# Never pushes main, never auto-merges. Deploys to Cloud Run stay manual.
 
 on:
   schedule:
-    - cron: "0 13 * * 1" # Mondays 13:00 UTC (~9am ET)
-  workflow_dispatch: {} # allow manual runs
+    - cron: "0 13 * * *" # daily 13:00 UTC (~9am ET)
+  workflow_dispatch: {}
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: aw-sync-upstream
@@ -24,91 +25,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Fetch upstream
-        run: |
-          git remote add upstream https://github.com/taylorwilsdon/google_workspace_mcp.git
-          git fetch upstream main
-
-      - name: Check how far behind upstream
-        id: check
-        run: |
-          BEHIND=$(git rev-list --count HEAD..upstream/main)
-          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
-          echo "main is $BEHIND commit(s) behind upstream/main"
-
-      - name: Merge upstream onto main
-        id: merge
-        if: steps.check.outputs.behind != '0'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # The fork carries local changes (this workflow plus the Chat-naming
-          # patch). A conflict here is expected when upstream edits the patched
-          # files; the job fails loudly and the failure report explains the fix.
-          git merge --no-edit upstream/main
-
-      - name: Install uv
-        if: steps.check.outputs.behind != '0'
-        uses: astral-sh/setup-uv@v7
-
-      - name: Set up Python
-        if: steps.check.outputs.behind != '0'
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        if: steps.check.outputs.behind != '0'
-        run: uv sync --extra test --frozen
-
-      - name: Ruff
-        if: steps.check.outputs.behind != '0'
-        run: uvx ruff check
-
-      - name: Pytest
-        id: pytest
-        if: steps.check.outputs.behind != '0'
-        run: uv run pytest
-
-      - name: Push updated main (tests passed)
-        if: steps.check.outputs.behind != '0'
-        run: git push origin main
-
-      # Issues are disabled on this fork, so notify via the run summary.
-      # GitHub also emails the workflow owner automatically on failure.
-      - name: Report - ready to deploy
-        if: steps.check.outputs.behind != '0'
-        run: |
-          VER=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
-          {
-            echo "## ✅ Upstream synced to v${VER} - tested, ready to deploy"
-            echo ""
-            echo "Fork \`main\` was synced to upstream and passed ruff + pytest, then pushed."
-            echo "Deploy to Cloud Run is **gated and manual** - follow the internal deploy runbook,"
-            echo "then bump the \`google_workspace_mcp\` submodule pointer in aw-claude-mcps."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Report - sync failed
-        if: failure() && steps.check.outputs.behind != '0'
-        run: |
-          {
-            echo "## 🚨 ACTION REQUIRED - AW fork sync needs a human"
-            echo ""
-            if [ "${{ steps.merge.outcome }}" = "failure" ]; then
-              echo "### Merge conflict"
-              echo ""
-              echo "Almost certainly on AW's carried Chat-naming patch (\`gchat/space_naming.py\` plus small hooks in \`chat_tools.py\`/\`scopes.py\`). This is expected whenever upstream edits those files."
-              echo ""
-              echo "Resolve keeping BOTH the upstream changes AND our patch, run \`uv run pytest\`, then push."
-            elif [ "${{ steps.pytest.outcome }}" = "failure" ]; then
-              echo "### Tests failed"
-              echo ""
-              echo "An upstream change broke our tests. Fork \`main\` is unchanged and nothing was deployed. Investigate before deploying."
-            else
-              echo "Sync failed before the merge/test steps. Fork \`main\` is unchanged and nothing was deployed."
-            fi
-            echo ""
-            echo "Safe state: fork \`main\` was left unchanged and nothing was deployed."
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Merge newest upstream release and open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/aw-sync-upstream.sh
