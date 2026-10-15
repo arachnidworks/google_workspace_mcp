@@ -7,6 +7,7 @@ This module provides MCP tools for interacting with Google Chat API.
 import base64
 import logging
 import asyncio
+import re
 import ssl
 from typing import List, Optional
 
@@ -17,75 +18,24 @@ from mcp.types import ToolAnnotations
 
 # Auth & server utilities
 from auth.service_decorator import require_google_service, require_multiple_services
+from core.file_limits import FileTooLargeError, download_http_url_bytes
+from core.gcs_attachment_storage import gcs_files_enabled
 from core.server import server
-from core.utils import TransientNetworkError, handle_http_errors
-from gchat.space_naming import (
-    resolve_identity,
-    resolve_self_user_id,
-    resolve_space_label,
+from core.utils import TransientNetworkError, UserInputError, handle_http_errors
+from gchat.chat_helpers import (
+    _execute_chat_request,
+    _extract_rich_links,
+    _name_spaces,
+    _none_if_blank,
+    _none_if_null_sentinel,
+    _resolve_sender,
 )
 
 logger = logging.getLogger(__name__)
 
+
 _SEARCH_MESSAGES_MAX_CONCURRENT_SPACE_FETCHES = 1
 _SEARCH_MESSAGES_SSL_RETRIES = 3
-_SEARCH_MESSAGES_RETRY_BASE_DELAY_SECONDS = 1
-
-
-async def _resolve_sender(people_service, sender_obj: dict) -> str:
-    """Resolve a Chat message sender to a display name.
-
-    Thin wrapper over the shared identity resolver in gchat.space_naming. Kept
-    here (importable at gchat.chat_tools._resolve_sender) so get_messages /
-    search_messages and their tests keep their existing behavior unchanged.
-    """
-    return await resolve_identity(people_service, sender_obj)
-
-
-async def _execute_chat_request(
-    request_factory,
-    *,
-    request_label: str,
-    retries: int = 1,
-    semaphore: Optional[asyncio.Semaphore] = None,
-):
-    """Execute a Chat API request in a worker thread with optional SSL retries."""
-    for attempt in range(retries):
-        try:
-            if semaphore is None:
-                return await asyncio.to_thread(lambda: request_factory().execute())
-            async with semaphore:
-                return await asyncio.to_thread(lambda: request_factory().execute())
-        except ssl.SSLError as e:
-            if attempt == retries - 1:
-                raise
-            delay = _SEARCH_MESSAGES_RETRY_BASE_DELAY_SECONDS * (2**attempt)
-            logger.warning(
-                "[search_messages] SSL error during %s on attempt %s/%s: %s. Retrying in %s seconds.",
-                request_label,
-                attempt + 1,
-                retries,
-                e,
-                delay,
-            )
-            await asyncio.sleep(delay)
-
-
-def _extract_rich_links(msg: dict) -> List[str]:
-    """Extract URLs from RICH_LINK annotations (smart chips).
-
-    When a user pastes a Google Workspace URL in Chat and it renders as a
-    smart chip, the URL is NOT in the text field — it's only available in
-    the annotations array as a RICH_LINK with richLinkMetadata.uri.
-    """
-    text = msg.get("text", "")
-    urls = []
-    for ann in msg.get("annotations", []):
-        if ann.get("type") == "RICH_LINK":
-            uri = ann.get("richLinkMetadata", {}).get("uri", "")
-            if uri and uri not in text:
-                urls.append(uri)
-    return urls
 
 
 @server.tool(
@@ -99,14 +49,9 @@ def _extract_rich_links(msg: dict) -> List[str]:
 )
 @require_multiple_services(
     [
-        # Only chat_spaces_readonly is gated here. chat.memberships.readonly is
-        # requested at consent (in CHAT_SCOPES) but NOT required, so tokens that
-        # haven't re-consented still run the tool; members.list then 403s and
-        # resolve_space_label degrades (DM -> message-sender fallback, group ->
-        # "Unnamed Group Chat"), per Design F.
         {
             "service_type": "chat",
-            "scopes": ["chat_spaces_readonly"],
+            "scopes": "chat_spaces_readonly",
             "param_name": "chat_service",
         },
         {
@@ -123,15 +68,9 @@ async def list_spaces(
     user_google_email: str,
     page_size: int = 100,
     space_type: str = "all",  # "all", "room", "dm"
-    resolve_names: bool = True,
 ) -> str:
     """
     Lists Google Chat spaces (rooms and direct messages) accessible to the user.
-
-    Args:
-        resolve_names: When True (default), resolve participant names so DMs and
-                       group chats get human-readable labels. Set False for a
-                       faster bare listing that skips per-space member lookups.
 
     Returns:
         str: A formatted list of Google Chat spaces accessible to the user.
@@ -157,103 +96,14 @@ async def list_spaces(
     if not spaces:
         return f"No Chat spaces found for type '{space_type}'."
 
-    self_user_id = (
-        await resolve_self_user_id(people_service, user_google_email)
-        if resolve_names
-        else None
-    )
-
+    space_labels = await _name_spaces(chat_service, people_service, spaces)
     output = [f"Found {len(spaces)} Chat spaces (type: {space_type}):"]
-    # ponytail: naming does O(N) sequential API calls (messages.list per DM/group, +members.list for groups); googleapiclient objects aren't thread-safe to fan out. Fine at tens of spaces; add a cap/pagination if a workspace has hundreds.
     for space in spaces:
-        if resolve_names:
-            space_name = await resolve_space_label(
-                chat_service, people_service, space, self_user_id
-            )
-        else:
-            space_name = space.get("displayName", "Unnamed Space")
         space_id = space.get("name", "")
+        space_name = space_labels[space.get("name")]
         space_type_actual = space.get("spaceType", "UNKNOWN")
         output.append(f"- {space_name} (ID: {space_id}, Type: {space_type_actual})")
 
-    return "\n".join(output)
-
-
-@server.tool(
-    title="Find Direct Message",
-    annotations=ToolAnnotations(
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
-    ),
-)
-@require_multiple_services(
-    [
-        # Only chat_spaces_readonly is gated here. chat.memberships.readonly is
-        # requested at consent (in CHAT_SCOPES) but NOT required, so tokens that
-        # haven't re-consented still run the tool; members.list then 403s and
-        # resolve_space_label degrades (DM -> message-sender fallback, group ->
-        # "Unnamed Group Chat"), per Design F.
-        {
-            "service_type": "chat",
-            "scopes": ["chat_spaces_readonly"],
-            "param_name": "chat_service",
-        },
-        {
-            "service_type": "people",
-            "scopes": "contacts_read",
-            "param_name": "people_service",
-        },
-    ]
-)
-@handle_http_errors("find_direct_message", is_read_only=True, service_type="chat")
-async def find_direct_message(
-    chat_service,
-    people_service,
-    user_google_email: str,
-    query: str,
-) -> str:
-    """
-    Finds Google Chat direct messages (DMs) by the other participant's name.
-
-    Lists DM spaces only, resolves each to the other participant's name, and
-    returns those whose label contains the query (case-insensitive substring).
-
-    Args:
-        query: Text to match against the resolved DM participant name.
-
-    Returns:
-        str: Matching DM space id(s) and labels, or a not-found message.
-    """
-    logger.info(f"[find_direct_message] Email={user_google_email}, Query='{query}'")
-
-    response = await asyncio.to_thread(
-        chat_service.spaces()
-        .list(filter='spaceType = "DIRECT_MESSAGE"', pageSize=100)
-        .execute
-    )
-    spaces = response.get("spaces", [])
-    if not spaces:
-        return "No direct messages found."
-
-    self_user_id = await resolve_self_user_id(people_service, user_google_email)
-
-    query_lower = query.lower()
-    matches = []
-    for space in spaces:
-        label = await resolve_space_label(
-            chat_service, people_service, space, self_user_id
-        )
-        if query_lower in label.lower():
-            matches.append((label, space.get("name", "")))
-
-    if not matches:
-        return f"No direct messages found matching '{query}'."
-
-    output = [f"Found {len(matches)} direct message(s) matching '{query}':"]
-    for label, space_id in matches:
-        output.append(f"- {label} (ID: {space_id})")
     return "\n".join(output)
 
 
@@ -306,7 +156,8 @@ async def get_messages(
     space_info = await asyncio.to_thread(
         chat_service.spaces().get(name=space_id).execute
     )
-    space_name = space_info.get("displayName", "Unknown Space")
+    space_labels = await _name_spaces(chat_service, people_service, [space_info])
+    space_name = space_labels[space_info.get("name")]
 
     # Get messages
     list_params = {"parent": space_id, "pageSize": page_size, "orderBy": order_by}
@@ -385,7 +236,7 @@ async def get_messages(
     title="Send Message",
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -399,18 +250,66 @@ async def send_message(
     message_text: str,
     thread_key: Optional[str] = None,
     thread_name: Optional[str] = None,
+    message_name: Optional[str] = None,
 ) -> str:
     """
-    Sends a message to a Google Chat space.
+    Sends a message to a Google Chat space, or edits a message already sent there.
 
     Args:
         thread_name: Reply in an existing thread by its resource name (e.g. spaces/X/threads/Y).
         thread_key: Reply in a thread by app-defined key (creates thread if not found).
+        message_name: Edit this message in place instead of sending a new one
+            (e.g. spaces/X/messages/Y, as returned by send_message or get_messages).
+            Must be a message of space_id. Only the text is replaced, and only the
+            author can edit their own message.
 
     Returns:
-        str: Confirmation message with sent message details.
+        str: Confirmation message with the sent or updated message details.
     """
     logger.info(f"[send_message] Email: '{user_google_email}', Space: '{space_id}'")
+
+    thread_key = _none_if_blank(thread_key)
+    thread_name = _none_if_blank(thread_name)
+    message_name = _none_if_null_sentinel(message_name)
+
+    if message_name is not None:
+        if thread_name or thread_key:
+            raise UserInputError(
+                "message_name cannot be combined with thread_name or thread_key: "
+                "editing a message cannot move it to another thread."
+            )
+        message_match = re.fullmatch(r"spaces/([^/]+)/messages/[^/]+", message_name)
+        if message_match is None:
+            raise UserInputError(
+                f"Invalid message_name '{message_name}'. "
+                "Expected the full resource name, e.g. spaces/X/messages/Y."
+            )
+        if f"spaces/{message_match.group(1)}" != space_id:
+            raise UserInputError(
+                f"message_name '{message_name}' does not belong to space '{space_id}'. "
+                "Expected the full resource name, e.g. spaces/X/messages/Y."
+            )
+
+        message = await asyncio.to_thread(
+            service.spaces()
+            .messages()
+            .patch(
+                name=message_name,
+                updateMask="text",
+                body={"text": message_text},
+            )
+            .execute
+        )
+
+        update_time = message.get("lastUpdateTime") or message.get("createTime", "")
+        msg = (
+            f"Message updated in space '{space_id}' by {user_google_email}. "
+            f"Message ID: {message.get('name', message_name)}, Time: {update_time}"
+        )
+        logger.info(
+            f"Successfully updated message '{message_name}' by {user_google_email}"
+        )
+        return msg
 
     message_body = {"text": message_text}
 
@@ -428,10 +327,10 @@ async def send_message(
         service.spaces().messages().create(**request_params).execute
     )
 
-    message_name = message.get("name", "")
+    sent_message_name = message.get("name", "")
     create_time = message.get("createTime", "")
 
-    msg = f"Message sent to space '{space_id}' by {user_google_email}. Message ID: {message_name}, Time: {create_time}"
+    msg = f"Message sent to space '{space_id}' by {user_google_email}. Message ID: {sent_message_name}, Time: {create_time}"
     logger.info(
         f"Successfully sent message to space '{space_id}' by {user_google_email}"
     )
@@ -485,8 +384,12 @@ async def search_messages(
         str: A formatted list of messages matching the search criteria.
     """
     logger.info(
-        f"[search_messages] Email={user_google_email}, Query='{query}', TimeFilter='{time_filter}'"
+        f"[search_messages] Email={user_google_email}, query_len={len(query) if query else 0}, has_time_filter={bool(time_filter)}"
     )
+    if query:
+        logger.debug(f"[search_messages] Query='{query}'")
+    if time_filter:
+        logger.debug(f"[search_messages] TimeFilter='{time_filter}'")
 
     # Google Chat messages.list supports time/thread filters, but not full-text
     # search. Apply only supported API filters, then filter message text below.
@@ -504,7 +407,11 @@ async def search_messages(
 
     # If specific space provided, search within that space
     if space_id:
-        list_params = {"parent": space_id, "pageSize": page_size}
+        list_params = {
+            "parent": space_id,
+            "pageSize": page_size,
+            "orderBy": "createTime desc",
+        }
         if filter_str:
             list_params["filter"] = filter_str
         response = await _execute_chat_request(
@@ -512,7 +419,14 @@ async def search_messages(
             request_label=f"fetching messages for {space_id}",
             retries=_SEARCH_MESSAGES_SSL_RETRIES,
         )
+        space = await _execute_chat_request(
+            lambda: chat_service.spaces().get(name=space_id),
+            request_label=f"fetching space {space_id}",
+            retries=_SEARCH_MESSAGES_SSL_RETRIES,
+        )
         messages = response.get("messages", [])
+        for msg in messages:
+            msg["_space"] = space
         context = f"space '{space_id}'"
     else:
         # Search across all accessible spaces
@@ -529,7 +443,11 @@ async def search_messages(
 
         async def fetch_space_messages(space: dict) -> tuple[List[dict], bool]:
             try:
-                list_params = {"parent": space.get("name"), "pageSize": page_size}
+                list_params = {
+                    "parent": space.get("name"),
+                    "pageSize": page_size,
+                    "orderBy": "createTime desc",
+                }
                 if filter_str:
                     list_params["filter"] = filter_str
                 response = await _execute_chat_request(
@@ -539,9 +457,8 @@ async def search_messages(
                     semaphore=fetch_semaphore,
                 )
                 msgs = response.get("messages", [])
-                display = space.get("displayName", "Unknown")
                 for msg in msgs:
-                    msg["_space_name"] = display
+                    msg["_space"] = space
                 return msgs, False
             except HttpError as e:
                 logger.debug(
@@ -569,7 +486,10 @@ async def search_messages(
                 "A transient SSL error occurred in 'search_messages' while searching Chat spaces. "
                 "Please try again shortly."
             )
-        context = "all accessible spaces"
+        if len(spaces) > len(spaces_to_search) or spaces_response.get("nextPageToken"):
+            context = f"the first {len(spaces_to_search)} accessible spaces"
+        else:
+            context = "all accessible spaces"
 
     # Client-side text filtering (text: operator is not supported by the API)
     if query:
@@ -596,6 +516,12 @@ async def search_messages(
     for key, sender_obj in sender_lookup.items():
         sender_map[key] = await _resolve_sender(people_service, sender_obj)
 
+    space_names = await _name_spaces(
+        chat_service,
+        people_service,
+        [msg["_space"] for msg in messages if msg.get("_space")],
+    )
+
     output = [f"Found {len(messages)} messages matching '{search_desc}' in {context}:"]
     for msg in messages:
         sender_obj = msg.get("sender", {})
@@ -605,7 +531,7 @@ async def search_messages(
         )
         create_time = msg.get("createTime", "Unknown Time")
         text_content = msg.get("text", "No text content")
-        space_name = msg.get("_space_name", "Unknown Space")
+        space_name = space_names.get(msg.get("_space", {}).get("name"), "Unknown Space")
 
         # Truncate long messages
         if len(text_content) > 100:
@@ -735,9 +661,9 @@ async def download_chat_attachment(
     )
 
     # Download the attachment binary data via the Chat API media endpoint.
-    # We use httpx with the Bearer token directly because MediaIoBaseDownload
-    # and AuthorizedHttp fail in OAuth 2.1 (no refresh_token). The attachment's
-    # downloadUri points to chat.google.com which requires browser cookies.
+    # Prefer httpx + Bearer token: MediaIoBaseDownload / AuthorizedHttp fail in
+    # OAuth 2.1 (no refresh_token). The attachment's downloadUri points to
+    # chat.google.com which requires browser cookies.
     if not media_resource and not att_name:
         return f"No resource name available for attachment '{filename}'."
 
@@ -747,29 +673,33 @@ async def download_chat_attachment(
 
     try:
         access_token = service._http.credentials.token
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            resp = await client.get(
-                download_url,
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            if resp.status_code != 200:
-                body = resp.text[:500]
-                return (
-                    f"Failed to download attachment '{filename}': "
-                    f"HTTP {resp.status_code} from {download_url}\n{body}"
-                )
-            file_bytes = resp.content
+        file_bytes = await download_http_url_bytes(
+            download_url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            file_name=filename,
+            kind="attachment",
+        )
+    except FileTooLargeError as e:
+        return str(e)
+    except httpx.HTTPStatusError as e:
+        body = (e.response.text or "")[:500]
+        return (
+            f"Failed to download attachment '{filename}': "
+            f"HTTP {e.response.status_code} from {download_url}\n{body}"
+        )
     except Exception as e:
         return f"Failed to download attachment '{filename}': {e}"
 
     size_bytes = len(file_bytes)
     size_kb = size_bytes / 1024
 
-    # Check if we're in stateless mode (can't save files)
+    # Stateless mode has no file storage unless GCS staging is configured.
     from auth.oauth_config import is_stateless_mode
 
-    if is_stateless_mode():
-        b64_preview = base64.urlsafe_b64encode(file_bytes).decode("utf-8")[:100]
+    if is_stateless_mode() and not gcs_files_enabled():
+        # 75 input bytes encode to at most 100 base64 characters; do not encode
+        # the entire attachment merely to return a short preview.
+        b64_preview = base64.urlsafe_b64encode(file_bytes[:75]).decode("utf-8")[:100]
         return "\n".join(
             [
                 f"Attachment downloaded: {filename} ({content_type})",
@@ -785,9 +715,12 @@ async def download_chat_attachment(
     from core.config import get_transport_mode
 
     storage = get_attachment_storage()
-    b64_data = base64.urlsafe_b64encode(file_bytes).decode("utf-8")
-    result = storage.save_attachment(
-        base64_data=b64_data, filename=filename, mime_type=content_type
+    # The GCS backend uploads over the network, so keep it off the event loop.
+    result = await asyncio.to_thread(
+        storage.save_attachment_bytes,
+        file_bytes=file_bytes,
+        filename=filename,
+        mime_type=content_type,
     )
 
     result_lines = [
@@ -802,7 +735,7 @@ async def download_chat_attachment(
             "\nThe file has been saved to disk and can be accessed directly via the file path."
         )
     else:
-        download_url = get_attachment_url(result.file_id)
+        download_url = await asyncio.to_thread(get_attachment_url, result.file_id)
         result_lines.append(f"\nDownload URL: {download_url}")
         result_lines.append("\nThe file will expire after 1 hour.")
 

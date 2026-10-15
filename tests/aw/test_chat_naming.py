@@ -320,7 +320,7 @@ def test_list_spaces_not_gated_on_memberships_scope():
     would never run. Locks Design F: DMs keep working pre-consent.
     """
     from auth.scopes import CHAT_MEMBERSHIPS_READONLY_SCOPE
-    from gchat.chat_tools import list_spaces
+    from aw.chat_tools import list_spaces
 
     fn = getattr(list_spaces, "fn", list_spaces)
     required = getattr(fn, "_required_google_scopes", None)
@@ -332,7 +332,7 @@ def test_list_spaces_not_gated_on_memberships_scope():
 async def test_spacetype_filters_are_quoted():
     """spaces.list rejects unquoted enum filters (HTTP 400). The enum value must
     be wrapped in double quotes: spaceType = "DIRECT_MESSAGE" / "SPACE"."""
-    from gchat.chat_tools import find_direct_message, list_spaces
+    from aw.chat_tools import find_direct_message, list_spaces
 
     # find_direct_message -> quoted DM filter
     chat = Mock()

@@ -13,13 +13,10 @@ RUN pip install --no-cache-dir uv
 COPY . .
 
 # Install Python dependencies using uv sync
-RUN uv sync --frozen --no-dev --extra disk
-
-# AW native parity: add the Firestore key-value backend so OAuth proxy sessions
-# and the re-auth policy can persist across Cloud Run cold starts. Installed
-# on top of the frozen sync (like the upstream Valkey extra, which is also not
-# in the default image) so the base lock file is untouched.
-RUN uv pip install "py-key-value-aio[firestore]"
+# --extra otel ships the OpenTelemetry SDK/exporter so tracing can be enabled at
+# runtime via OTEL_* env vars; it stays a no-op unless an OTLP endpoint is set.
+# --extra valkey backs WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND=valkey.
+RUN uv sync --frozen --no-dev --extra disk --extra otel --extra valkey
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash app \
@@ -46,10 +43,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 ENV TOOL_TIER=""
 ENV TOOLS=""
 
-# Use entrypoint for the base command and CMD for args.
-# --no-sync: run against the already-built environment WITHOUT re-syncing, so the
-# supplemental Firestore extra installed above (not in the frozen lock) is not
-# stripped at container start. Without this, `uv run` re-syncs to the exact lock
-# and Firestore silently disappears, reintroducing cold-start session loss.
+# Use entrypoint for the base command and CMD for args
 ENTRYPOINT ["/bin/sh", "-c"]
-CMD ["uv run --no-sync main.py --transport streamable-http ${TOOL_TIER:+--tool-tier \"$TOOL_TIER\"} ${TOOLS:+--tools $TOOLS}"]
+CMD ["exec /app/.venv/bin/python main.py --transport streamable-http ${TOOL_TIER:+--tool-tier \"$TOOL_TIER\"} ${TOOLS:+--tools $TOOLS}"]
