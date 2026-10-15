@@ -1,23 +1,36 @@
-"""Test fixtures scoped to the auth test suite.
-
-The AW native-parity tests drive their coroutines with ``asyncio.run()``, which
-closes its event loop and clears the thread-global loop on exit. Later suites
-(e.g. tests/gcontacts) still use the deprecated ``asyncio.get_event_loop()``,
-which then raises "There is no current event loop". Restore a usable loop after
-each auth test so collection order stays harmless.
-"""
-
-import asyncio
+"""Shared fixtures for auth tests."""
 
 import pytest
 
+from auth import oauth_config
+
+# Trusted-gateway mode is the first branch in AuthInfoMiddleware, so ambient values
+# for these silently reroute every middleware test.
+_GATEWAY_ENV_VARS = (
+    "MCP_TRUST_GATEWAY_IDENTITY",
+    "GATEWAY_IDENTITY_HEADER",
+    "GATEWAY_IDENTITY_JWKS_URL",
+    "GATEWAY_IDENTITY_AUDIENCE",
+    "GATEWAY_IDENTITY_ISSUER",
+    "GATEWAY_IDENTITY_ALGORITHMS",
+)
+
 
 @pytest.fixture(autouse=True)
-def _restore_event_loop():
-    yield
+def isolated_gateway_config(monkeypatch):
+    """Run each auth test against a gateway-disabled config, then restore.
+
+    ``get_oauth_config`` memoises a module-level singleton (auth/oauth_config.py),
+    so both halves matter: clearing the env before the reload stops ambient
+    configuration from leaking in, and reloading again on teardown stops a test that
+    set gateway variables from leaving a contaminated singleton behind for whatever
+    runs next.
+    """
+    for var in _GATEWAY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    oauth_config.reload_oauth_config()
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+        yield
+    finally:
+        monkeypatch.undo()
+        oauth_config.reload_oauth_config()

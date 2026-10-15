@@ -71,9 +71,19 @@ SECRETS="GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:${OAUTH_SECRET_VE
 # (`gcloud run services update --min 1`), not here. Do not add --min-instances:
 # that is revision-level and would pin a warm instance for every tagged preview
 # revision, which is what caused the Aug 2026 Cloud Run overspend.
+# Dockerfile stays upstream-owned; the AW image builds from Dockerfile.aw.
+# gcloud has no flag to pick a Dockerfile, so upload a staged copy of the files
+# gcloud would send (tracked + untracked, minus .gitignore) with Dockerfile.aw
+# as its Dockerfile.
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+git ls-files -z --cached --others --exclude-standard \
+  | rsync -a --from0 --files-from=- ./ "$STAGE/"
+cp Dockerfile.aw "$STAGE/Dockerfile"
+
 echo "== Deploying to Cloud Run =="
 gcloud run deploy "$SERVICE" \
-  --source . \
+  --source "$STAGE" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
   --allow-unauthenticated \

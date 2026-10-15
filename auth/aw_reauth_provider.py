@@ -20,7 +20,6 @@ from a FastMCP token's JTI exactly as the base provider does.
 
 import logging
 
-from fastmcp.server.auth.providers.google import GoogleProvider
 from mcp.server.auth.provider import (
     AuthorizationCode,
     OAuthClientInformationFull,
@@ -30,12 +29,13 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthToken
 
 from auth.aw_reauth import get_reauth_store
+from core.server import WorkspaceGoogleProvider
 
 logger = logging.getLogger(__name__)
 
 
-class AwGoogleProvider(GoogleProvider):
-    """GoogleProvider + AW 5-day/30-day re-auth policy enforced on refresh."""
+class AwGoogleProvider(WorkspaceGoogleProvider):
+    """Upstream WorkspaceGoogleProvider + AW 5-day/30-day re-auth policy enforced on refresh."""
 
     async def _resolve_upstream_token_id(self, token: str, token_use: str):
         """Map a FastMCP access/refresh JWT to its stable upstream_token_id."""

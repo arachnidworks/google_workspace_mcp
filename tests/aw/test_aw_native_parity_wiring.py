@@ -12,7 +12,7 @@ import importlib
 import auth.aw_consent as aw_consent
 
 
-def test_both_middlewares_registered_in_order():
+def test_both_middlewares_registered_in_order(overlay):
     import core.server as s
 
     names = [type(m).__name__ for m in s.server.middleware]
