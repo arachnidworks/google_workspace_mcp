@@ -11,6 +11,8 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from fastmcp.exceptions import ToolError
+
 from gmail.gmail_tools import _forward_gmail_message_impl
 from core.utils import UserInputError
 
@@ -161,6 +163,9 @@ async def test_forward_simple_text_email():
     assert "Email forwarded" in result
     assert "fwd001" in result
     mock_service.users().messages().send.assert_called()
+    mock_service.users().messages().send.return_value.execute.assert_called_once_with(
+        num_retries=0
+    )
 
     sent = get_sent_mime_message(mock_service)
     assert sent["Subject"] == "Fwd: Hello"
@@ -172,6 +177,28 @@ async def test_forward_simple_text_email():
     assert "This is the body." in body
     assert "Forwarded message" in body
     assert "alice@example.com" in body
+
+
+@pytest.mark.asyncio
+async def test_forward_reports_unknown_delivery_on_ambiguous_failure():
+    message = create_mock_message(
+        subject="Hello",
+        from_addr="alice@example.com",
+        to_addr="bob@example.com",
+        text_body="This is the body.",
+    )
+    mock_service = create_mock_service(message)
+    mock_service.users().messages().send().execute.side_effect = ConnectionResetError(
+        "reset by peer"
+    )
+
+    with pytest.raises(ToolError, match="Check the Sent folder before sending again"):
+        await _forward_gmail_message_impl(
+            service=mock_service,
+            message_id="msg123",
+            to="recipient@example.com",
+            user_google_email="me@example.com",
+        )
 
 
 @pytest.mark.asyncio
