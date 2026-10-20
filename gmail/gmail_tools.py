@@ -88,6 +88,7 @@ from gmail.gmail_helpers import (
     format_filter_apply_result,
     html_newlines_to_br,
     html_to_text_preserving_breaks,
+    send_message_once,
     update_gmail_filter,
 )
 
@@ -1617,9 +1618,7 @@ async def _fetch_search_result_headers(
                 headers_by_id[mid] = None
             else:
                 try:
-                    headers_by_id[mid] = _extract_headers(
-                        entry["data"].get("payload") or {}, GMAIL_METADATA_HEADERS
-                    )
+                    headers_by_id[mid] = _extract_search_metadata(entry["data"])
                 except Exception as exc:
                     logger.warning(
                         f"[search_gmail_messages] Invalid metadata for message {mid}, will retry: {exc}"
@@ -1643,9 +1642,7 @@ async def _fetch_search_result_headers(
             )
             if msg_data and not error:
                 try:
-                    headers_by_id[mid] = _extract_headers(
-                        msg_data.get("payload") or {}, GMAIL_METADATA_HEADERS
-                    )
+                    headers_by_id[mid] = _extract_search_metadata(msg_data)
                 except Exception as exc:
                     logger.warning(
                         f"[search_gmail_messages] Invalid metadata for message {mid} after retry: {exc}"
@@ -1656,6 +1653,14 @@ async def _fetch_search_result_headers(
                 )
 
     return headers_by_id
+
+
+def _extract_search_metadata(message: Dict[str, Any]) -> Dict[str, str]:
+    """Return a metadata fetch's headers, plus its label IDs under ``Labels`` if any."""
+    metadata = _extract_headers(message.get("payload") or {}, GMAIL_METADATA_HEADERS)
+    if label_ids := message.get("labelIds"):
+        metadata["Labels"] = ", ".join(label_ids)
+    return metadata
 
 
 def _format_gmail_results_plain(
@@ -1720,6 +1725,8 @@ def _format_gmail_results_plain(
                         f"     Date: {headers.get('Date', '(unknown date)')}",
                     ]
                 )
+                if headers.get("Labels"):
+                    lines.append(f"     Labels: {headers['Labels']}")
 
         lines.extend(
             [
@@ -1775,17 +1782,19 @@ async def search_gmail_messages(
 
     Args:
         query (str): The search query. Supports standard Gmail search operators.
+            Results include drafts unless the query excludes them (e.g. in:sent or -in:drafts).
         user_google_email (str): The user's Google email address. Required.
         page_size (int): The maximum number of messages to return. Defaults to 10.
         page_token (Optional[str]): Token for retrieving the next page of results. Use the next_page_token from a previous response.
         include_headers (bool): If True, also fetch each message's metadata and include
-            Subject, From, and Date per result. Costs one metadata get per result,
-            grouped into HTTP batches of up to 10, plus retries for transient failures.
+            Subject, From, Date and label IDs (e.g. DRAFT, SENT) per result. Costs one
+            metadata get per result, grouped into HTTP batches of up to 10, plus retries
+            for transient failures.
             Defaults to False (output unchanged from prior versions).
 
     Returns:
         str: LLM-friendly structured results with Message IDs, Thread IDs, and clickable Gmail web interface URLs for each found message.
-        With include_headers=True, each result also includes Subject, From, and Date.
+        With include_headers=True, each result also includes Subject, From, Date and Labels.
         Includes pagination token if more results are available.
     """
     logger.info(
@@ -2546,7 +2555,7 @@ async def get_gmail_attachment_content(
     title="Send Gmail Message",
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -2953,10 +2962,7 @@ async def send_gmail_message(
         send_body["threadId"] = thread_id_final
 
     # Send the message
-    sent_message = await asyncio.to_thread(
-        service.users().messages().send(userId="me", body=send_body).execute,
-        num_retries=GOOGLE_API_WRITE_RETRIES,
-    )
+    sent_message = await send_message_once(service, send_body)
     message_id = sent_message.get("id")
 
     if requested_attachment_count > 0:
@@ -3120,10 +3126,7 @@ async def _forward_gmail_message_impl(
         return f"Forward draft created{attachment_info}! Draft ID: {draft_id}"
 
     # Send the message
-    sent_message = await asyncio.to_thread(
-        service.users().messages().send(userId="me", body=send_body).execute,
-        num_retries=GOOGLE_API_WRITE_RETRIES,
-    )
+    sent_message = await send_message_once(service, send_body)
     sent_message_id = sent_message.get("id")
     return f"Email forwarded{attachment_info}! Message ID: {sent_message_id}"
 
