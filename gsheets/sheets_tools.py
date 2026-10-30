@@ -26,7 +26,11 @@ from gsheets.sheets_helpers import (
     _clamp_a1_read_rows,
     _column_to_index,
     _build_boolean_rule,
+    _build_tab_style_properties,
+    _build_update_borders_request,
+    _build_dropdown_request,
     _build_gradient_rule,
+    _build_merge_request,
     _fetch_cell_formulas,
     _fetch_detailed_sheet_errors,
     _fetch_grid_metadata,
@@ -37,6 +41,7 @@ from gsheets.sheets_helpers import (
     _format_sheet_error_section,
     _insert_cell_comment,
     _normalize_chips_input,
+    _normalize_merge_type,
     _parse_a1_range,
     _parse_condition_values,
     _parse_gradient_points,
@@ -655,11 +660,20 @@ async def _format_sheet_range_impl(
     bold: Optional[bool] = None,
     italic: Optional[bool] = None,
     font_size: Optional[int] = None,
-) -> str:
+    merge_cells: Optional[bool] = None,
+    merge_type: Optional[str] = None,
+    borders: Optional[str] = None,
+    border_style: Optional[str] = None,
+    border_color: Optional[str] = None,
+    dropdown_values: Optional[List[str]] = None,
+    dropdown_strict: Optional[bool] = None,
+    clear_dropdown: Optional[bool] = None,
+) -> dict:
     """Internal implementation for format_sheet_range.
 
     Applies formatting to a Google Sheets range including colors, number formats,
-    text wrapping, alignment, and text styling.
+    text wrapping, alignment, text styling, cell merging/unmerging, borders, and
+    dropdown lists.
 
     Args:
         service: Google Sheets API service client.
@@ -675,10 +689,41 @@ async def _format_sheet_range_impl(
         bold: Whether to apply bold formatting.
         italic: Whether to apply italic formatting.
         font_size: Font size in points.
+        merge_cells: True merges the range, False unmerges it.
+        merge_type: MERGE_ALL (default), MERGE_COLUMNS, or MERGE_ROWS; implies a merge.
+        borders: Comma-separated border sides (all, outer, inner, top, bottom,
+            left, right, inner_horizontal, inner_vertical), or "none".
+        border_style: Border line style (SOLID, SOLID_MEDIUM, SOLID_THICK,
+            DASHED, DOTTED, DOUBLE). Defaults to SOLID.
+        border_color: Hex border color. Defaults to black.
+        dropdown_values: Values offered as a dropdown list in every cell.
+        dropdown_strict: Reject other values (default True) or only warn.
+        clear_dropdown: Remove all data validation (dropdowns, checkboxes,
+            other rules) from the range.
 
     Returns:
         Dictionary with keys: range_name, spreadsheet_id, summary.
     """
+    if (border_style or border_color) and not borders:
+        raise UserInputError(
+            "border_style and border_color need borders to say which sides to draw."
+        )
+    border_request = None
+    border_summary = None
+    if borders:
+        border_request, border_summary = _build_update_borders_request(
+            borders, border_style, border_color
+        )
+    wants_dropdown = dropdown_values is not None or bool(clear_dropdown)
+    if dropdown_strict is not None and dropdown_values is None:
+        raise UserInputError("dropdown_strict needs dropdown_values.")
+    dropdown_request = None
+    dropdown_summary = None
+    if wants_dropdown:
+        dropdown_request, dropdown_summary = _build_dropdown_request(
+            dropdown_values, dropdown_strict, clear_dropdown
+        )
+
     # Validate at least one formatting option is provided
     has_any_format = any(
         [
@@ -691,14 +736,21 @@ async def _format_sheet_range_impl(
             bold is not None,
             italic is not None,
             font_size is not None,
+            merge_cells is not None,
+            merge_type is not None,
+            borders,
+            wants_dropdown,
         ]
     )
     if not has_any_format:
         raise UserInputError(
-            "Provide at least one formatting option (background_color, text_color, "
+            "Provide at least one formatting or merge option (background_color, text_color, "
             "number_format_type, wrap_strategy, horizontal_alignment, vertical_alignment, "
-            "bold, italic, or font_size)."
+            "bold, italic, font_size, merge_cells, merge_type, borders, dropdown_values, "
+            "or clear_dropdown)."
         )
+
+    normalized_merge_type = _normalize_merge_type(merge_cells, merge_type)
 
     # Parse colors
     bg_color_parsed = _parse_hex_color(background_color)
@@ -822,14 +874,9 @@ async def _format_sheet_range_impl(
         user_entered_format["verticalAlignment"] = v_align_normalized
         fields.append("userEnteredFormat.verticalAlignment")
 
-    if not user_entered_format:
-        raise UserInputError(
-            "No formatting applied. Verify provided formatting options."
-        )
-
-    # Build and execute request
-    request_body = {
-        "requests": [
+    requests = []
+    if user_entered_format:
+        requests.append(
             {
                 "repeatCell": {
                     "range": grid_range,
@@ -837,8 +884,27 @@ async def _format_sheet_range_impl(
                     "fields": ",".join(fields),
                 }
             }
-        ]
-    }
+        )
+    if normalized_merge_type:
+        requests.append(
+            _build_merge_request(grid_range, range_name, normalized_merge_type)
+        )
+    elif merge_cells is False:
+        requests.append({"unmergeCells": {"range": grid_range}})
+    if border_request:
+        border_request["updateBorders"]["range"] = grid_range
+        requests.append(border_request)
+    if dropdown_request:
+        dropdown_request["setDataValidation"]["range"] = grid_range
+        requests.append(dropdown_request)
+
+    if not requests:
+        raise UserInputError(
+            "No formatting or merge action applied. Verify provided options."
+        )
+
+    # Build and execute request
+    request_body = {"requests": requests}
 
     await asyncio.to_thread(
         service.spreadsheets()
@@ -869,6 +935,14 @@ async def _format_sheet_range_impl(
         applied_parts.append("italic" if italic else "not italic")
     if font_size is not None:
         applied_parts.append(f"font size {font_size}")
+    if normalized_merge_type:
+        applied_parts.append(f"merged cells ({normalized_merge_type})")
+    elif merge_cells is False:
+        applied_parts.append("unmerged cells")
+    if border_summary:
+        applied_parts.append(border_summary)
+    if dropdown_summary:
+        applied_parts.append(dropdown_summary)
 
     summary = ", ".join(applied_parts)
 
@@ -884,7 +958,7 @@ async def _format_sheet_range_impl(
     title="Format Sheet Range",
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -906,10 +980,18 @@ async def format_sheet_range(
     bold: Optional[bool] = None,
     italic: Optional[bool] = None,
     font_size: Optional[int] = None,
+    merge_cells: Optional[bool] = None,
+    merge_type: Optional[str] = None,
+    borders: Optional[str] = None,
+    border_style: Optional[str] = None,
+    border_color: Optional[str] = None,
+    dropdown_values: Optional[StringList] = None,
+    dropdown_strict: Optional[bool] = None,
+    clear_dropdown: Optional[bool] = None,
 ) -> str:
     """
     Applies formatting to a range: colors, number formats, text wrapping,
-    alignment, and text styling.
+    alignment, text styling, cell merging/unmerging, borders, and dropdown lists.
 
     Colors accept hex strings (#RRGGBB). Number formats follow Sheets types
     (e.g., NUMBER, CURRENCY, DATE, PERCENT). If no sheet name is provided,
@@ -933,6 +1015,24 @@ async def format_sheet_range(
         bold (Optional[bool]): Whether to apply bold formatting.
         italic (Optional[bool]): Whether to apply italic formatting.
         font_size (Optional[int]): Font size in points.
+        merge_cells (Optional[bool]): True merges the range, False unmerges it.
+            Merging keeps only the top-left value of each merged group.
+        merge_type (Optional[str]): MERGE_ALL (default), MERGE_COLUMNS, or
+            MERGE_ROWS. Setting it implies merge_cells=True.
+        borders (Optional[str]): Which borders to draw, comma-separated: all,
+            outer, inner, top, bottom, left, right, inner_horizontal,
+            inner_vertical (e.g., "outer" or "bottom,inner_horizontal").
+            "none" removes every border in the range.
+        border_style (Optional[str]): SOLID (default), SOLID_MEDIUM, SOLID_THICK,
+            DASHED, DOTTED, or DOUBLE. Requires borders.
+        border_color (Optional[str]): Hex border color (default black). Requires
+            borders.
+        dropdown_values (Optional[List[str]]): Turns every cell in the range into
+            a dropdown offering these values (e.g., ["open", "done"]).
+        dropdown_strict (Optional[bool]): With dropdown_values: reject other
+            input (default True) or only show a warning (False).
+        clear_dropdown (Optional[bool]): Remove all data validation from the
+            range: dropdowns, but also checkboxes and other validation rules.
 
     Returns:
         str: Confirmation of the applied formatting.
@@ -958,6 +1058,14 @@ async def format_sheet_range(
         bold=bold,
         italic=italic,
         font_size=font_size,
+        merge_cells=merge_cells,
+        merge_type=merge_type,
+        borders=borders,
+        border_style=border_style,
+        border_color=border_color,
+        dropdown_values=dropdown_values,
+        dropdown_strict=dropdown_strict,
+        clear_dropdown=clear_dropdown,
     )
 
     # Build confirmation message with user email
@@ -1821,6 +1929,19 @@ def _build_row_visibility_requests(sheet_id, row_nums, hidden, label):
     return reqs
 
 
+def _count_deleted_before(requests, dimension, index):
+    """Count positions in dimension deleted by requests that precede index."""
+    spans = [
+        req["deleteDimension"]["range"]
+        for req in requests
+        if "deleteDimension" in req
+        and req["deleteDimension"]["range"]["dimension"] == dimension
+    ]
+    return sum(
+        max(0, min(index, span["endIndex"]) - span["startIndex"]) for span in spans
+    )
+
+
 async def _resize_sheet_dimensions_impl(
     service,
     spreadsheet_id: str,
@@ -1848,6 +1969,11 @@ async def _resize_sheet_dimensions_impl(
     Manages sheet-level dimension properties: resize columns/rows, auto-resize
     to fit content, freeze rows/columns, hide/unhide rows/columns, and
     insert/delete rows/columns.
+
+    Every row number and column letter refers to the sheet as it was before
+    the call, even when one call both inserts and deletes. Deletes are applied
+    before inserts, and an insert position inside a deleted span lands where
+    that span was.
 
     Args:
         service: Google Sheets API service client.
@@ -1934,22 +2060,7 @@ async def _resize_sheet_dimensions_impl(
         .execute
     )
     sheets = metadata.get("sheets", [])
-    if not sheets:
-        raise UserInputError("No sheets found in spreadsheet.")
-
-    # Find target sheet
-    target_sheet = None
-    if sheet_name:
-        for sheet in sheets:
-            if sheet.get("properties", {}).get("title") == sheet_name:
-                target_sheet = sheet
-                break
-        if not target_sheet:
-            raise UserInputError(f"Sheet '{sheet_name}' not found.")
-    else:
-        target_sheet = sheets[0]
-
-    sheet_id = target_sheet["properties"]["sheetId"]
+    sheet_id = _select_sheet(sheets, sheet_name)["properties"]["sheetId"]
 
     requests = []
     applied_parts = []
@@ -2148,86 +2259,6 @@ async def _resize_sheet_dimensions_impl(
         )
         applied_parts.append(f"unhid rows: {', '.join(str(r) for r in unhide_rows)}")
 
-    # Build insert row requests
-    if insert_rows is not None:
-        if not isinstance(insert_rows, int) or insert_rows < 1:
-            raise UserInputError("insert_rows must be a positive integer.")
-        if insert_rows_at is not None:
-            if not isinstance(insert_rows_at, int) or insert_rows_at < 1:
-                raise UserInputError(
-                    "insert_rows_at must be a positive integer (1-based)."
-                )
-            start_idx = insert_rows_at - 1
-        else:
-            start_idx = None
-
-        if start_idx is not None:
-            requests.append(
-                {
-                    "insertDimension": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "dimension": "ROWS",
-                            "startIndex": start_idx,
-                            "endIndex": start_idx + insert_rows,
-                        },
-                        "inheritFromBefore": start_idx > 0,
-                    }
-                }
-            )
-            applied_parts.append(
-                f"inserted {insert_rows} row(s) at row {insert_rows_at}"
-            )
-        else:
-            requests.append(
-                {
-                    "appendDimension": {
-                        "sheetId": sheet_id,
-                        "dimension": "ROWS",
-                        "length": insert_rows,
-                    }
-                }
-            )
-            applied_parts.append(f"appended {insert_rows} row(s)")
-
-    # Build insert column requests
-    if insert_columns is not None:
-        if not isinstance(insert_columns, int) or insert_columns < 1:
-            raise UserInputError("insert_columns must be a positive integer.")
-        if insert_columns_at is not None:
-            col_idx = _column_to_index(str(insert_columns_at).upper())
-            if col_idx is None:
-                raise UserInputError(
-                    f"Invalid column letter for insert_columns_at: '{insert_columns_at}'."
-                )
-            requests.append(
-                {
-                    "insertDimension": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "dimension": "COLUMNS",
-                            "startIndex": col_idx,
-                            "endIndex": col_idx + insert_columns,
-                        },
-                        "inheritFromBefore": col_idx > 0,
-                    }
-                }
-            )
-            applied_parts.append(
-                f"inserted {insert_columns} column(s) at column {insert_columns_at}"
-            )
-        else:
-            requests.append(
-                {
-                    "appendDimension": {
-                        "sheetId": sheet_id,
-                        "dimension": "COLUMNS",
-                        "length": insert_columns,
-                    }
-                }
-            )
-            applied_parts.append(f"appended {insert_columns} column(s)")
-
     # Reject mixing delete_rows and delete_row_range — their interleaved
     # deleteDimension requests shift indices unpredictably.
     if delete_rows and delete_row_range:
@@ -2235,6 +2266,9 @@ async def _resize_sheet_dimensions_impl(
             "delete_rows and delete_row_range cannot be used together. "
             "Specify one or the other."
         )
+
+    # Deletes run before inserts so every caller index refers to the original
+    # layout; insert positions are shifted past the deletions preceding them.
 
     # Build delete row requests (process in reverse to keep indices stable)
     if delete_rows:
@@ -2248,8 +2282,7 @@ async def _resize_sheet_dimensions_impl(
                 raise UserInputError(
                     f"Row number must be an integer >= 1 in delete_rows, got {row_num}."
                 ) from exc
-        sorted_rows = sorted(parsed_delete_rows, reverse=True)
-        for row_num in sorted_rows:
+        for row_num in sorted(set(parsed_delete_rows), reverse=True):
             if row_num < 1:
                 raise UserInputError(
                     f"Row number must be >= 1 in delete_rows, got {row_num}."
@@ -2311,17 +2344,15 @@ async def _resize_sheet_dimensions_impl(
     if delete_columns:
         if not isinstance(delete_columns, list):
             raise UserInputError("delete_columns must be a list of column letters.")
-        col_indices = []
+        col_indices = set()
         for col_letter in delete_columns:
             col_idx = _column_to_index(str(col_letter).upper())
             if col_idx is None:
                 raise UserInputError(
                     f"Invalid column letter in delete_columns: '{col_letter}'."
                 )
-            col_indices.append((col_letter, col_idx))
-        # Sort by index descending to keep indices stable during deletion
-        col_indices.sort(key=lambda x: x[1], reverse=True)
-        for _, col_idx in col_indices:
+            col_indices.add(col_idx)
+        for col_idx in sorted(col_indices, reverse=True):
             requests.append(
                 {
                     "deleteDimension": {
@@ -2337,6 +2368,88 @@ async def _resize_sheet_dimensions_impl(
         applied_parts.append(
             f"deleted columns: {', '.join(str(c) for c in delete_columns)}"
         )
+
+    # Build insert row requests
+    if insert_rows is not None:
+        if not isinstance(insert_rows, int) or insert_rows < 1:
+            raise UserInputError("insert_rows must be a positive integer.")
+        if insert_rows_at is not None:
+            if not isinstance(insert_rows_at, int) or insert_rows_at < 1:
+                raise UserInputError(
+                    "insert_rows_at must be a positive integer (1-based)."
+                )
+            start_idx = insert_rows_at - 1
+            start_idx -= _count_deleted_before(requests, "ROWS", start_idx)
+        else:
+            start_idx = None
+
+        if start_idx is not None:
+            requests.append(
+                {
+                    "insertDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": start_idx,
+                            "endIndex": start_idx + insert_rows,
+                        },
+                        "inheritFromBefore": start_idx > 0,
+                    }
+                }
+            )
+            applied_parts.append(
+                f"inserted {insert_rows} row(s) at row {insert_rows_at}"
+            )
+        else:
+            requests.append(
+                {
+                    "appendDimension": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "length": insert_rows,
+                    }
+                }
+            )
+            applied_parts.append(f"appended {insert_rows} row(s)")
+
+    # Build insert column requests
+    if insert_columns is not None:
+        if not isinstance(insert_columns, int) or insert_columns < 1:
+            raise UserInputError("insert_columns must be a positive integer.")
+        if insert_columns_at is not None:
+            col_idx = _column_to_index(str(insert_columns_at).upper())
+            if col_idx is None:
+                raise UserInputError(
+                    f"Invalid column letter for insert_columns_at: '{insert_columns_at}'."
+                )
+            col_idx -= _count_deleted_before(requests, "COLUMNS", col_idx)
+            requests.append(
+                {
+                    "insertDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "COLUMNS",
+                            "startIndex": col_idx,
+                            "endIndex": col_idx + insert_columns,
+                        },
+                        "inheritFromBefore": col_idx > 0,
+                    }
+                }
+            )
+            applied_parts.append(
+                f"inserted {insert_columns} column(s) at column {insert_columns_at}"
+            )
+        else:
+            requests.append(
+                {
+                    "appendDimension": {
+                        "sheetId": sheet_id,
+                        "dimension": "COLUMNS",
+                        "length": insert_columns,
+                    }
+                }
+            )
+            applied_parts.append(f"appended {insert_columns} column(s)")
 
     # Execute batch update
     await asyncio.to_thread(
@@ -2370,9 +2483,12 @@ async def manage_sheet_tab(
     action: str,
     new_name: Optional[str] = None,
     new_index: Optional[int] = None,
+    tab_color: Optional[str] = None,
+    show_gridlines: Optional[bool] = None,
 ) -> str:
     """
-    Manages the lifecycle of an existing sheet tab: rename, delete, hide, unhide or reorder.
+    Manages an existing sheet tab: rename, delete, hide, unhide, reorder, or
+    style (tab color and gridlines).
 
     Use create_sheet to add a tab, and resize_sheet_dimensions for row and column
     level changes. This tool operates on the tab itself.
@@ -2381,14 +2497,18 @@ async def manage_sheet_tab(
         user_google_email: User's Google email address
         spreadsheet_id: ID of the spreadsheet
         sheet_name: Title of the existing tab to act on
-        action: One of "rename", "delete", "hide", "unhide", "reorder"
+        action: One of "rename", "delete", "hide", "unhide", "reorder", "style"
         new_name: New title, required for action="rename"
         new_index: New zero-based position, required for action="reorder"
+        tab_color: For action="style": hex tab color (#RRGGBB), or "none" to
+            remove it
+        show_gridlines: For action="style": show (True) or hide (False) the
+            sheet's gridlines
 
     Returns:
         str: Confirmation of the change.
     """
-    valid_actions = ("rename", "delete", "hide", "unhide", "reorder")
+    valid_actions = ("rename", "delete", "hide", "unhide", "reorder", "style")
     action_lower = action.strip().lower() if isinstance(action, str) else ""
     if action_lower not in valid_actions:
         raise UserInputError(
@@ -2409,6 +2529,14 @@ async def manage_sheet_tab(
             raise UserInputError(
                 "new_index must be a non-negative integer for action='reorder'."
             )
+    if action_lower == "style":
+        style_properties, style_fields, style_summary = _build_tab_style_properties(
+            tab_color, show_gridlines
+        )
+    elif tab_color is not None or show_gridlines is not None:
+        raise UserInputError(
+            "tab_color and show_gridlines only apply to action='style'."
+        )
 
     logger.info(
         f"[manage_sheet_tab] Email: '{user_google_email}', Spreadsheet: {spreadsheet_id}, "
@@ -2441,6 +2569,15 @@ async def manage_sheet_tab(
             properties["hidden"] = action_lower == "hide"
             fields = "hidden"
             summary = f"{action_lower} sheet '{sheet_name}'"
+        elif action_lower == "style":
+            sheet_type = target_sheet["properties"].get("sheetType", "GRID")
+            if show_gridlines is not None and sheet_type != "GRID":
+                raise UserInputError(
+                    f"'{sheet_name}' is a {sheet_type} sheet and has no gridlines."
+                )
+            properties.update(style_properties)
+            fields = style_fields
+            summary = f"styled sheet '{sheet_name}' ({style_summary})"
         else:
             if new_index >= len(sheets):
                 raise UserInputError(
@@ -2511,6 +2648,11 @@ async def resize_sheet_dimensions(
     Manages sheet-level dimension properties: resize columns/rows, auto-resize
     to fit content, freeze rows/columns, hide/unhide rows/columns, and
     insert/delete rows/columns.
+
+    Every row number and column letter refers to the sheet as it was before
+    the call, even when one call both inserts and deletes. Deletes are applied
+    before inserts, and an insert position inside a deleted span lands where
+    that span was.
 
     Args:
         user_google_email (str): The user's Google email address. Required.
