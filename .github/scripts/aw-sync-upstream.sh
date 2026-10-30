@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Merge the newest upstream release tag into sync/upstream and open or update a
-# PR into main, review requested from chad-aw. Never pushes main, never merges.
+# PR into main, review requested from chad-aw. Merges the PR only when it is clean
+# and lint and tests pass; never pushes main directly.
 # DRY_RUN=1 does the merge locally and skips every push and gh call.
 set -euo pipefail
 
@@ -48,6 +49,18 @@ if [ -n "$UPSTREAM_WF" ]; then
   git commit -q --amend --no-edit
 fi
 
+# Merge to main only when nothing needs a human: no conflicts, no skipped workflows, lint and tests green.
+# Runs here because PRs opened with GITHUB_TOKEN trigger no CI.
+AUTO=0
+TESTS_FAILED=0
+if [ "$CONFLICT" = 0 ] && [ -z "$UPSTREAM_WF" ]; then
+  if uv sync -q --frozen --extra test && uv run --frozen ruff check && uv run --frozen pytest -q; then
+    AUTO=1
+  else
+    TESTS_FAILED=1
+  fi
+fi
+
 if [ "$CONFLICT" = 1 ]; then
   BODY="Upstream release \`$TAG\` conflicts with AW changes. Conflict markers are committed on this branch and must be resolved before merging.
 
@@ -57,7 +70,7 @@ $(printf '%s\n' "$FILES" | sed 's/^/- `/; s/$/`/')
 Resolve: check out \`$BRANCH\`, fix the files, run \`uv run --frozen --extra test pytest\`, push. Do not merge as is."
   TITLE="Sync upstream $TAG (CONFLICTS)"
 else
-  BODY="Merges upstream release \`$TAG\` into main. CI runs on this PR. Merging does not deploy: Cloud Run deploys stay manual (\`deploy.sh\`)."
+  BODY="Merges upstream release \`$TAG\` into main. Lint and tests run in the sync job (bot-opened PRs get no CI). Merging does not deploy: Cloud Run deploys stay manual (\`deploy.sh\`)."
   TITLE="Sync upstream $TAG"
 fi
 if [ -n "$UPSTREAM_WF" ]; then
@@ -66,9 +79,15 @@ if [ -n "$UPSTREAM_WF" ]; then
 Upstream changed these workflows. They are left out (the sync token cannot push workflow files); apply by hand if wanted, see \`git diff ${BASE:0:8} $TAG -- .github/workflows\`:
 $(printf '%s\n' "$UPSTREAM_WF" | sed 's/^/- `/; s/$/`/')"
 fi
+if [ "$TESTS_FAILED" = 1 ]; then
+  TITLE="$TITLE (TESTS FAILED)"
+  BODY="$BODY
+
+Lint or tests failed in the sync job, see the AW Sync Upstream run log. Not auto-merged."
+fi
 
 if [ -n "$DRY_RUN" ]; then
-  echo "DRY RUN: tag=$TAG conflict=$CONFLICT"; echo "$TITLE"; echo "$BODY"; exit 0
+  echo "DRY RUN: tag=$TAG conflict=$CONFLICT auto_merge=$AUTO"; echo "$TITLE"; echo "$BODY"; exit 0
 fi
 
 # gh would otherwise resolve the upstream remote as the target repo.
@@ -78,5 +97,7 @@ if PR=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq 
   gh pr edit "$PR" --title "$TITLE" --body "$BODY"
   gh pr edit "$PR" --add-reviewer "$REVIEWER"
 else
-  gh pr create --base main --head "$BRANCH" --title "$TITLE" --body "$BODY" --reviewer "$REVIEWER"
+  PR=$(gh pr create --base main --head "$BRANCH" --title "$TITLE" --body "$BODY" --reviewer "$REVIEWER")
 fi
+[ "$AUTO" = 1 ] && gh pr merge "$PR" --merge
+exit 0
