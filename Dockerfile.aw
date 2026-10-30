@@ -1,6 +1,6 @@
 # AW build of the upstream image (Dockerfile stays upstream-owned).
 # deploy.sh stages this file as the Dockerfile of a copy of the source tree.
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
