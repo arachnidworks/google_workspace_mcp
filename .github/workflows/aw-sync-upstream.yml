@@ -3,7 +3,8 @@ name: AW Sync Upstream
 # GitHub cannot trigger a workflow from another repo's release, so poll: each
 # run finds the newest upstream release tag not yet in main, merges it into
 # sync/upstream and opens (or updates) a PR into main with chad-aw as reviewer.
-# Never pushes main, never auto-merges. Deploys to Cloud Run stay manual.
+# Merges the PR itself only when clean (no conflicts, no skipped workflow
+# changes, lint and tests green). Deploys to Cloud Run stay manual.
 
 on:
   schedule:
@@ -25,6 +26,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - uses: astral-sh/setup-uv@v7
       - name: Merge newest upstream release and open PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
