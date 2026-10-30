@@ -39,6 +39,15 @@ if [ "$CONFLICT" = 1 ]; then
   git commit -q -m "chore(sync): merge upstream $TAG (CONFLICTS, resolve before merging)"
 fi
 
+# GITHUB_TOKEN cannot push workflow files: keep main's workflows, list upstream's changes for review.
+BASE=$(git merge-base origin/main "$TAG")
+UPSTREAM_WF=$(git diff --name-only "$BASE" "$TAG" -- .github/workflows)
+if [ -n "$UPSTREAM_WF" ]; then
+  git rm -rq .github/workflows
+  git checkout origin/main -- .github/workflows
+  git commit -q --amend --no-edit
+fi
+
 if [ "$CONFLICT" = 1 ]; then
   BODY="Upstream release \`$TAG\` conflicts with AW changes. Conflict markers are committed on this branch and must be resolved before merging.
 
@@ -50,6 +59,12 @@ Resolve: check out \`$BRANCH\`, fix the files, run \`uv run --frozen --extra tes
 else
   BODY="Merges upstream release \`$TAG\` into main. CI runs on this PR. Merging does not deploy: Cloud Run deploys stay manual (\`deploy.sh\`)."
   TITLE="Sync upstream $TAG"
+fi
+if [ -n "$UPSTREAM_WF" ]; then
+  BODY="$BODY
+
+Upstream changed these workflows. They are left out (the sync token cannot push workflow files); apply by hand if wanted, see \`git diff ${BASE:0:8} $TAG -- .github/workflows\`:
+$(printf '%s\n' "$UPSTREAM_WF" | sed 's/^/- `/; s/$/`/')"
 fi
 
 if [ -n "$DRY_RUN" ]; then
