@@ -255,6 +255,7 @@ Create, rename, delete, or populate tabs from Markdown. Uses `action` to select 
 | parent_tab_id | string | no | | Nest under a parent tab (create only) |
 | markdown_text | string | populate | | Markdown source to render |
 | replace_existing | boolean | no | `true` | Clear tab body before inserting markdown |
+| link_color | string | no | | `#RRGGBB` applied to every link (populate only) |
 
 **Supported markdown** (populate_from_markdown action)
 

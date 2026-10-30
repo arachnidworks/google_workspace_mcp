@@ -3136,20 +3136,13 @@ async def manage_doc_tab(
         # Append after existing content instead of prepending at index 1.
         insert_at = tab_end - 1 if tab_end > 2 else 1
         all_requests.extend(
-<<<<<<< HEAD
-            markdown_to_docs_requests(
-                markdown_text,
-                tab_id=tab_id,
-                start_index=insert_at,
-                link_color=link_color,
-=======
             build_markdown_insert_requests(
                 markdown_text,
                 insert_at,
                 tab_id=tab_id,
                 split_paragraph=last_element.get("startIndex", insert_at) < insert_at,
                 drop_bullet="bullet" in last_element.get("paragraph", {}),
->>>>>>> v2.2.1
+                link_color=link_color,
             )
         )
 

@@ -20,10 +20,8 @@ from typing import Optional
 
 from markdown_it import MarkdownIt
 
-<<<<<<< HEAD
-from gdocs.docs_helpers import _normalize_color
-=======
 from gdocs.docs_helpers import (
+    _normalize_color,
     create_delete_bullet_list_request,
     create_delete_range_request,
     create_insert_text_request,
@@ -33,7 +31,6 @@ _NORMAL_TEXT = {"namedStyleType": "NORMAL_TEXT"}
 _BLOCK_GAP = {"spaceBelow": {"magnitude": 12, "unit": "PT"}}
 _DOCS_MAX_TABLE_ROWS = 1000
 _DOCS_MAX_TABLE_COLS = 20
->>>>>>> v2.2.1
 
 
 def markdown_to_docs_requests(
@@ -64,16 +61,12 @@ def markdown_to_docs_requests(
     return requests
 
 
-<<<<<<< HEAD
-def _emit_requests(tokens, requests, tab_id, start_index, link_color=None):
-=======
 def _utf16_len(text: str) -> int:
     """Return the length of text in UTF-16 code units, the Docs API index unit."""
     return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
 
 
-def _emit_requests(tokens, requests, tab_id, start_index):
->>>>>>> v2.2.1
+def _emit_requests(tokens, requests, tab_id, start_index, link_color=None):
     """Walk markdown-it tokens and append Docs API requests.
 
     Maintains a running `cursor` that represents the current insertion point
@@ -251,7 +244,7 @@ def _emit_requests(tokens, requests, tab_id, start_index):
 
         if tok.type == "table_open":
             row_cells, i = _collect_table_cells(tokens, i)
-            _emit_table(row_cells, requests, cursor, tab_id)
+            _emit_table(row_cells, requests, cursor, tab_id, link_color)
             i += 1
             continue
 
@@ -298,7 +291,7 @@ def _emit_table_rows_as_text(row_cells, requests, cursor, tab_id):
         cursor[0] += _utf16_len(line)
 
 
-def _emit_table(row_cells, requests, cursor, tab_id):
+def _emit_table(row_cells, requests, cursor, tab_id, link_color=None):
     """Emit insertTable plus cell fills for one table and advance cursor past it.
 
     An empty R x C table inserted at L keeps a newline paragraph at L, puts
@@ -323,7 +316,9 @@ def _emit_table(row_cells, requests, cursor, tab_id):
     for r in reversed(range(rows)):
         for c in reversed(range(cols)):
             index = start + 4 + r * stride + 2 * c
-            text, styles = _render_inline_with_styles(row_cells[r][c], index, tab_id)
+            text, styles = _render_inline_with_styles(
+                row_cells[r][c], index, tab_id, link_color
+            )
             if not text:
                 continue
             end = index + _utf16_len(text)
@@ -559,6 +554,7 @@ def build_markdown_insert_requests(
     tab_id: Optional[str] = None,
     split_paragraph: bool = False,
     drop_bullet: bool = False,
+    link_color: Optional[str] = None,
 ) -> list[dict]:
     """Build requests inserting markdown at ``insert_at``; [] if it renders empty.
 
@@ -567,7 +563,7 @@ def build_markdown_insert_requests(
     """
     content_start = insert_at + 1 if split_paragraph else insert_at
     markdown_requests = markdown_to_docs_requests(
-        markdown_text, tab_id=tab_id, start_index=content_start
+        markdown_text, tab_id=tab_id, start_index=content_start, link_color=link_color
     )
     if not markdown_requests:
         return []
