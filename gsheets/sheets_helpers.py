@@ -8,6 +8,7 @@ conditional formatting helpers.
 import asyncio
 import json
 import logging
+import math
 import re
 from typing import Any, List, Optional, Union
 
@@ -26,6 +27,7 @@ A1_PART_REGEX = re.compile(r"^([A-Za-z]*)(\d*)$")
 SHEET_TITLE_SAFE_RE = re.compile(r"^[A-Za-z0-9_]+$")
 COLUMN_LETTER_REGEX = re.compile(r"^[A-Za-z]+$")
 QUOTED_SHEET_ONLY_REGEX = re.compile(r"^'(?:[^']|'')+'$")
+MERGE_TYPES = ("MERGE_ALL", "MERGE_COLUMNS", "MERGE_ROWS")
 
 
 def _column_to_index(column: str) -> Optional[int]:
@@ -249,6 +251,221 @@ def _parse_hex_color(color: Optional[str]) -> Optional[dict]:
         raise UserInputError(f"Color '{color}' is not valid hex.") from exc
 
     return {"red": red, "green": green, "blue": blue}
+
+
+def _build_tab_style_properties(
+    tab_color: Optional[str] = None,
+    show_gridlines: Optional[bool] = None,
+) -> tuple[dict, str, str]:
+    """
+    Build the sheet properties for manage_sheet_tab's "style" action.
+
+    Args:
+        tab_color: Hex color for the tab, or "none" to remove it.
+        show_gridlines: Whether the sheet shows gridlines.
+
+    Returns:
+        The properties to set (without sheetId), the fields mask, and a
+        short human-readable summary.
+    """
+    if tab_color is None and show_gridlines is None:
+        raise UserInputError("action='style' needs tab_color and/or show_gridlines.")
+
+    properties: dict = {}
+    fields = []
+    parts = []
+    if tab_color is not None:
+        color = tab_color.strip()
+        if not color:
+            raise UserInputError("tab_color must be a hex color (#RRGGBB) or 'none'.")
+        if color.lower() == "none":
+            # An empty colour style with the field in the mask clears it.
+            properties["tabColorStyle"] = {}
+            parts.append("removed tab color")
+        else:
+            properties["tabColorStyle"] = {"rgbColor": _parse_hex_color(color)}
+            parts.append(f"tab color #{color.lstrip('#').upper()}")
+        fields.append("tabColorStyle")
+    if show_gridlines is not None:
+        properties["gridProperties"] = {"hideGridlines": not show_gridlines}
+        fields.append("gridProperties.hideGridlines")
+        parts.append("gridlines shown" if show_gridlines else "gridlines hidden")
+    return properties, ",".join(fields), ", ".join(parts)
+
+
+BORDER_SIDES = ("top", "bottom", "left", "right", "innerHorizontal", "innerVertical")
+# Keys are normalized: lowercase with "_" and "-" removed, so "inner_horizontal",
+# "inner-horizontal" and the API's own "innerHorizontal" all match.
+BORDER_SIDE_ALIASES = {
+    "all": BORDER_SIDES,
+    "outer": ("top", "bottom", "left", "right"),
+    "inner": ("innerHorizontal", "innerVertical"),
+    "top": ("top",),
+    "bottom": ("bottom",),
+    "left": ("left",),
+    "right": ("right",),
+    "innerhorizontal": ("innerHorizontal",),
+    "innervertical": ("innerVertical",),
+}
+BORDER_SIDE_NAMES = (
+    "all",
+    "outer",
+    "inner",
+    "top",
+    "bottom",
+    "left",
+    "right",
+    "inner_horizontal",
+    "inner_vertical",
+)
+BORDER_STYLES = {"DOTTED", "DASHED", "SOLID", "SOLID_MEDIUM", "SOLID_THICK", "DOUBLE"}
+
+
+def _build_update_borders_request(
+    borders: str,
+    border_style: Optional[str] = None,
+    border_color: Optional[str] = None,
+) -> tuple[dict, str]:
+    """
+    Build an updateBorders request. The caller sets its "range" once the
+    GridRange is known, so input errors surface before any API call.
+
+    Args:
+        borders: Comma-separated sides: all, outer, inner, top, bottom, left,
+            right, inner_horizontal, inner_vertical. "none" removes all borders.
+        border_style: One of BORDER_STYLES. Defaults to SOLID.
+        border_color: Hex color. Defaults to black.
+
+    Returns:
+        The request dict (without range) and a short human-readable summary.
+    """
+    tokens = [t.strip().lower() for t in borders.split(",") if t.strip()]
+    if not tokens:
+        raise UserInputError("borders must name at least one side.")
+    style_given = bool(border_style and border_style.strip())
+    color_given = bool(border_color and border_color.strip())
+
+    if "none" in tokens:
+        if tokens != ["none"]:
+            raise UserInputError("borders='none' cannot be combined with sides.")
+        if style_given or color_given:
+            raise UserInputError(
+                "borders='none' removes borders; drop border_style and border_color."
+            )
+        border: dict = {"style": "NONE"}
+        sides = BORDER_SIDES
+        summary = "borders removed"
+    else:
+        keys = [t.replace("_", "").replace("-", "") for t in tokens]
+        unknown = [t for t, k in zip(tokens, keys) if k not in BORDER_SIDE_ALIASES]
+        if unknown:
+            raise UserInputError(
+                f"Unknown border side(s) {unknown}. Use 'none' alone, or any of "
+                f"{list(BORDER_SIDE_NAMES)}."
+            )
+        style = border_style.strip().upper() if style_given else "SOLID"
+        if style not in BORDER_STYLES:
+            raise UserInputError(
+                f"border_style must be one of {sorted(BORDER_STYLES)}."
+            )
+        border = {
+            "style": style,
+            "color": _parse_hex_color(border_color)
+            if color_given
+            else {"red": 0.0, "green": 0.0, "blue": 0.0},
+        }
+        sides = [side for k in keys for side in BORDER_SIDE_ALIASES[k]]
+        summary = f"{style} borders ({', '.join(tokens)})"
+        if color_given:
+            summary += f" in {border_color.strip()}"
+
+    return {"updateBorders": {side: dict(border) for side in sides}}, summary
+
+
+def _build_dropdown_request(
+    dropdown_values: Optional[List[str]] = None,
+    dropdown_strict: Optional[bool] = None,
+    clear_dropdown: Optional[bool] = None,
+) -> tuple[dict, str]:
+    """
+    Build a setDataValidation request that adds or removes a dropdown list.
+    The caller sets its "range" once the GridRange is known, so input errors
+    surface before any API call.
+
+    Args:
+        dropdown_values: Allowed values, shown as a dropdown (ONE_OF_LIST).
+        dropdown_strict: Reject values outside the list (default True). False
+            only shows a warning.
+        clear_dropdown: Remove all data validation from the range instead
+            (dropdowns, but also checkboxes and other rules).
+
+    Returns:
+        The request dict (without range) and a short human-readable summary.
+    """
+    if clear_dropdown:
+        if dropdown_values is not None:
+            raise UserInputError(
+                "Pass either dropdown_values or clear_dropdown, not both."
+            )
+        return {"setDataValidation": {}}, "data validation removed"
+
+    values = [str(v).strip() for v in (dropdown_values or [])]
+    values = [v for v in values if v]
+    if not values:
+        raise UserInputError("dropdown_values must contain at least one value.")
+
+    strict = dropdown_strict is not False
+    request = {
+        "setDataValidation": {
+            "rule": {
+                "condition": {
+                    "type": "ONE_OF_LIST",
+                    "values": [{"userEnteredValue": v} for v in values],
+                },
+                "strict": strict,
+                "showCustomUi": True,
+            },
+        }
+    }
+    summary = f"dropdown [{', '.join(values)}]"
+    if not strict:
+        summary += " (warning only)"
+    return request, summary
+
+
+def _normalize_merge_type(
+    merge_cells: Optional[bool], merge_type: Optional[str]
+) -> Optional[str]:
+    """Return the merge type to apply, or None when the call does not merge."""
+    if merge_type is None:
+        return "MERGE_ALL" if merge_cells else None
+    if merge_cells is False:
+        raise UserInputError(
+            "Cannot specify merge_type when merge_cells is False (unmerging)."
+        )
+    normalized = merge_type.strip().upper()
+    if normalized not in MERGE_TYPES:
+        raise UserInputError(f"merge_type must be one of {list(MERGE_TYPES)}.")
+    return normalized
+
+
+def _build_merge_request(grid_range: dict, range_name: str, merge_type: str) -> dict:
+    """Build a mergeCells request, rejecting ranges where any merge group is one cell."""
+    rows = grid_range.get("endRowIndex", math.inf) - grid_range.get("startRowIndex", 0)
+    cols = grid_range.get("endColumnIndex", math.inf) - grid_range.get(
+        "startColumnIndex", 0
+    )
+    group_size = {
+        "MERGE_ALL": rows * cols,
+        "MERGE_COLUMNS": rows,
+        "MERGE_ROWS": cols,
+    }[merge_type]
+    if group_size < 2:
+        raise UserInputError(
+            f"Cannot apply {merge_type} to '{range_name}': each merged group "
+            "must span at least 2 cells."
+        )
+    return {"mergeCells": {"range": grid_range, "mergeType": merge_type}}
 
 
 def _index_to_column(index: int) -> str:
