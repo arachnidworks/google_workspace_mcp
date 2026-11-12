@@ -51,3 +51,9 @@ def test_drive_discovery_accepts_copy_comments():
     service = build("drive", "v3", developerKey="test", static_discovery=True)
     request = service.files().copy(fileId="file-1", body={}, copyComments=True)
     assert "copyComments=true" in request.uri
+
+
+@pytest.mark.asyncio
+async def test_default_root_destination_is_sent():
+    # Omitting parents puts the copy beside a shared-drive source, where readers cannot write.
+    assert (await _copy())["body"]["parents"] == ["root"]
