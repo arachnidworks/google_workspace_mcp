@@ -27,7 +27,7 @@ if "describe" in sys.argv:
 """
 
 
-def _run_deploy(tmp_path):
+def _run_deploy(tmp_path, *args):
     shutil.copy(DEPLOY_SH, tmp_path / "deploy.sh")
     for name in ("Dockerfile", "Dockerfile.aw", ".gitignore"):
         shutil.copy(DEPLOY_SH.parent / name, tmp_path / name)
@@ -48,7 +48,11 @@ def _run_deploy(tmp_path):
         "GCLOUD_LOG": str(log),
     }
     subprocess.run(
-        ["bash", "deploy.sh"], cwd=tmp_path, env=env, check=True, capture_output=True
+        ["bash", "deploy.sh", *args],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        capture_output=True,
     )
     return [json.loads(line) for line in log.read_text().splitlines()]
 
@@ -100,3 +104,26 @@ def test_deploy_builds_from_dockerfile_aw(tmp_path):
     # .env holds local config; .gitignore keeps it out of the upload.
     assert ".env" not in files
     assert "deploy.sh" in files
+
+
+def test_live_deploy_routes_traffic_to_latest(tmp_path):
+    # Traffic pinned by an earlier --tag deploy left a live deploy serving nobody.
+    calls = _run_deploy(tmp_path)
+    assert [c for c in calls if c[:3] == ["run", "services", "update-traffic"]] == [
+        [
+            "run",
+            "services",
+            "update-traffic",
+            "workspace-mcp",
+            "--to-latest",
+            "--project",
+            "idyllic-kiln-489511-t4",
+            "--region",
+            "us-central1",
+        ]
+    ]
+
+
+def test_tag_deploy_leaves_traffic_alone(tmp_path):
+    calls = _run_deploy(tmp_path, "--tag", "dev")
+    assert not [c for c in calls if c[:3] == ["run", "services", "update-traffic"]]

@@ -101,6 +101,12 @@ if [[ -n "$DEPLOY_TAG" ]]; then
   exit 0
 fi
 
+# A --tag deploy pins traffic to the revision that was live; without this a
+# later live deploy builds a revision that serves nobody.
+echo "== Routing traffic to the new revision =="
+gcloud run services update-traffic "$SERVICE" --to-latest \
+  --project "$PROJECT_ID" --region "$REGION"
+
 echo ""
 echo "Deployed: $URL"
 echo "MCP endpoint: ${URL}/mcp"
