@@ -2892,7 +2892,10 @@ async def copy_drive_file(
     else:
         copy_body["name"] = f"Copy of {original_name}"
 
+<<<<<<< HEAD
     # Always set: a copy with no parents lands beside its source, not in My Drive.
+=======
+>>>>>>> v2.5.0
     copy_body["parents"] = [resolved_folder_id]
 
     copied_file = await asyncio.to_thread(
