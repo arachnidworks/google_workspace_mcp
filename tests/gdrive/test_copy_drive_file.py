@@ -59,11 +59,6 @@ def test_drive_discovery_accepts_copy_comments():
 
 
 @pytest.mark.asyncio
-<<<<<<< HEAD
-async def test_default_root_destination_is_sent():
-    # Omitting parents puts the copy beside a shared-drive source, where readers cannot write.
-    assert (await _copy())["body"]["parents"] == ["root"]
-=======
 @pytest.mark.parametrize(
     "kwargs, expected",
     [
@@ -75,4 +70,3 @@ async def test_copy_always_sends_resolved_parent_folder(
     kwargs: dict[str, Any], expected: str
 ) -> None:
     assert (await _copy(**kwargs))["body"]["parents"] == [expected]
->>>>>>> v2.5.0
