@@ -16,7 +16,7 @@ import functools
 import inspect
 
 from pathlib import Path
-from typing import Annotated, Any, List, NamedTuple, Optional, Union
+from typing import Annotated, Any, List, NamedTuple, Optional, TypeGuard, Union
 
 from pydantic import BeforeValidator
 from defusedxml import DefusedXmlException, ElementTree as ET
@@ -26,7 +26,7 @@ from fastmcp.exceptions import ToolError
 from googleapiclient.errors import HttpError
 from mcp.types import ImageContent
 from .api_enablement import get_api_enablement_message
-from auth.google_auth import GoogleAuthenticationError
+from auth.google_auth import GoogleAuthenticationError, get_default_credentials_dir
 from auth.oauth_config import (
     get_transport_mode,
     is_external_oauth21_provider,
@@ -95,6 +95,23 @@ class UserInputError(Exception):
     """Raised for user-facing input/validation errors that shouldn't be retried."""
 
     pass
+
+
+_PATH_SEGMENT_PATTERN = re.compile(r"(?!\.+\Z)[A-Za-z0-9._-]+")
+
+
+def is_path_segment(value: Any) -> TypeGuard[str]:
+    """Return True if value is safe unescaped as one segment of a Google API resource path."""
+    return isinstance(value, str) and _PATH_SEGMENT_PATTERN.fullmatch(value) is not None
+
+
+def check_path_segment(value: Any, label: str) -> str:
+    """Return value, raising UserInputError unless is_path_segment accepts it."""
+    if not is_path_segment(value):
+        raise UserInputError(
+            f"Invalid {label} {value!r}: expected only letters, digits, '.', '_' or '-'."
+        )
+    return value
 
 
 def _coerce_json_str_to_type(v: Any, expected_type: type) -> Any:
@@ -258,6 +275,15 @@ def _get_allowed_file_dirs() -> list[Path]:
     return unique_dirs
 
 
+def _file_identity(path: Path) -> Optional[tuple[int, int]]:
+    """Return ``(st_dev, st_ino)`` for ``path``, or None if it cannot be stat'ed."""
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return None
+    return stat_result.st_dev, stat_result.st_ino
+
+
 def validate_file_path(file_path: str) -> Path:
     """
     Validate that a file path is safe to read from the server filesystem.
@@ -337,18 +363,23 @@ def validate_file_path(file_path: str) -> Path:
         )
 
     home = Path.home()
-    sensitive_home_dirs = (
-        ".kube",
-        ".gnupg",
-        ".config/gcloud",
-    )
-    for sensitive_dir in sensitive_home_dirs:
-        blocked = home / sensitive_dir
-        if resolved == blocked or str(resolved).startswith(str(blocked) + "/"):
-            raise ValueError(
-                f"Access to '{resolved_str}' is not allowed: "
-                "path is in a directory that commonly contains secrets or credentials."
-            )
+    blocked_ids = {
+        _file_identity(blocked)
+        for blocked in (
+            home / ".kube",
+            home / ".gnupg",
+            home / ".config" / "gcloud",
+            Path(get_default_credentials_dir()),
+        )
+    } - {None}
+    if any(
+        _file_identity(ancestor) in blocked_ids
+        for ancestor in (resolved, *resolved.parents)
+    ):
+        raise ValueError(
+            f"Access to '{resolved_str}' is not allowed: "
+            "path is in a directory that commonly contains secrets or credentials."
+        )
 
     # Block other credential/secret file patterns
     sensitive_names = {
