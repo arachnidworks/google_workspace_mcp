@@ -6,13 +6,14 @@ conditional formatting helpers.
 """
 
 import asyncio
+import csv
 import json
 import logging
 import math
 import re
 from typing import Any, List, Optional, Union
 
-from core.utils import UserInputError
+from core.utils import UserInputError, validate_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -941,6 +942,11 @@ def _grid_range_to_a1(grid_range: dict, sheet_titles: dict[int, str]) -> str:
     if start_row is None and end_row is None and start_col is None and end_col is None:
         return sheet_title
 
+    if end_row is not None and start_row is None:
+        start_row = 0
+    if end_col is not None and start_col is None:
+        start_col = 0
+
     def row_label(idx: Optional[int]) -> str:
         return str(idx + 1) if idx is not None else ""
 
@@ -961,14 +967,10 @@ def _grid_range_to_a1(grid_range: dict, sheet_titles: dict[int, str]) -> str:
             if start_label == end_label and is_single_cell
             else f"{start_label}:{end_label}"
         )
-    elif start_label:
-        range_ref = start_label
-    elif end_label:
-        range_ref = end_label
     else:
-        range_ref = ""
+        range_ref = start_label
 
-    return f"{sheet_title}!{range_ref}" if range_ref else sheet_title
+    return f"{sheet_title}!{range_ref}"
 
 
 def _summarize_conditional_rule(
@@ -1162,6 +1164,34 @@ async def _copy_paste_range(
         .execute
     )
     return normalized
+
+
+DELIMITED_FILE_DELIMITERS = {".csv": ",", ".tsv": "\t"}
+
+
+def _read_delimited_file_values(file_path: str) -> List[List[str]]:
+    """Read a local .csv or .tsv file into rows of cell strings."""
+    path_obj = validate_file_path(file_path)
+    if not path_obj.is_file():
+        raise UserInputError(f"file_path is not a file: {file_path}")
+    delimiter = DELIMITED_FILE_DELIMITERS.get(path_obj.suffix.lower())
+    if delimiter is None:
+        raise UserInputError(
+            "file_path must be a .csv or .tsv file; convert other formats with "
+            "import_to_google_sheets."
+        )
+    try:
+        with open(path_obj, encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.reader(handle, delimiter=delimiter, strict=True))
+    except UnicodeDecodeError as exc:
+        raise UserInputError(f"file_path must be UTF-8 text: {exc}") from exc
+    except csv.Error as exc:
+        raise UserInputError(
+            f"Could not parse file_path as delimited text: {exc}"
+        ) from exc
+    if not any(rows):
+        raise UserInputError(f"file_path has no rows to write: {file_path}")
+    return rows
 
 
 async def _copy_sheet_to_spreadsheet(
