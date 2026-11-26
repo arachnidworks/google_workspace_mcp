@@ -368,6 +368,7 @@ def validate_file_path(file_path: str) -> Path:
         for blocked in (
             home / ".kube",
             home / ".gnupg",
+            home / ".docker" / "config.json",
             home / ".config" / "gcloud",
             Path(get_default_credentials_dir()),
         )
@@ -394,9 +395,8 @@ def validate_file_path(file_path: str) -> Path:
         ".pypirc",
         ".netrc",
         ".git-credentials",
-        ".docker/config.json",
     }
-    if file_name in sensitive_names:
+    if file_name in sensitive_names or path_parts[-2:] == [".docker", "config.json"]:
         raise ValueError(
             f"Access to '{resolved_str}' is not allowed: "
             "this file commonly contains secrets or credentials."
@@ -1257,6 +1257,49 @@ def _format_http_error_for_log(error: HttpError) -> str:
     return f"status={status}, request={request}"
 
 
+_RATE_LIMIT_ERROR_REASONS = frozenset(
+    {
+        "rateLimitExceeded",
+        "userRateLimitExceeded",
+        "quotaExceeded",
+        "dailyLimitExceeded",
+        "RATE_LIMIT_EXCEEDED",
+    }
+)
+
+
+def _is_rate_limit_or_quota_error(error: HttpError) -> bool:
+    """Return True when Google rejected the request for API rate or quota limits."""
+    if error.resp.status == 429:
+        return True
+    if error.resp.status != 403:
+        return False
+    try:
+        payload = json.loads(error.content)
+    except ValueError:
+        return False
+    for entry in payload if isinstance(payload, list) else [payload]:
+        err = entry.get("error") if isinstance(entry, dict) else None
+        if not isinstance(err, dict):
+            continue
+        if err.get("status") == "RESOURCE_EXHAUSTED":
+            return True
+        items = [err]
+        for key in ("errors", "details"):
+            if isinstance(err.get(key), list):
+                items.extend(err[key])
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            reason, detail_type = item.get("reason"), item.get("@type")
+            if (isinstance(reason, str) and reason in _RATE_LIMIT_ERROR_REASONS) or (
+                isinstance(detail_type, str)
+                and detail_type.endswith("/google.rpc.QuotaFailure")
+            ):
+                return True
+    return False
+
+
 APPS_SCRIPT_USER_SETTINGS_URL = "https://script.google.com/home/usersettings"
 
 
@@ -1356,6 +1399,12 @@ def handle_http_errors(
                             f"settings. LLM: Ask the user to open "
                             f"{APPS_SCRIPT_USER_SETTINGS_URL}, turn on 'Google Apps "
                             f"Script API', wait a minute, and retry."
+                        )
+                    elif _is_rate_limit_or_quota_error(error):
+                        message = (
+                            f"API error in {tool_name}: {error_summary}. "
+                            "Google API rate limit or quota exceeded (not an authentication failure). "
+                            "LLM: Retry later with fewer concurrent requests."
                         )
                     elif error.resp.status in [401, 403]:
                         # Authentication/authorization errors
